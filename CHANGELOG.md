@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-19
+
+### Changed
+
+- Desktop-host sessions now report `source: "desktop"` / `sourceLabel: "Desktop"`
+  with explicit confidence instead of `Unknown`. The macOS and Windows daemons
+  both recognise the desktop host as the lock/lease holder.
+
 ## [0.3.4] - 2026-10-19
 
 ### Fixed

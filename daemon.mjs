@@ -593,8 +593,19 @@ function resolveSource(sidecar, inferred) {
       : defaultSourceLabel(source)
     return { source, sourceLabel: label, sourceConfidence: 'explicit' }
   }
-  if (inferred) return { ...inferred, sourceConfidence: 'inferred' }
+  if (inferred) return { ...inferred, sourceConfidence: inferred.sourceConfidence || 'inferred' }
   return { source: 'unknown', sourceLabel: 'Unknown', sourceConfidence: 'unknown' }
+}
+
+/**
+ * The lock/lease holder is the desktop host itself: ownership is exact, so the
+ * source is "Desktop" rather than an unknown launcher.
+ */
+function desktopSource(desktops, holders) {
+  if (!desktops || !Array.isArray(holders)) return null
+  return holders.some((pid) => desktops.has(pid))
+    ? { source: 'desktop', sourceLabel: 'Desktop', sourceConfidence: 'explicit' }
+    : null
 }
 
 /** Stable 0..5 color assignment so a session keeps the same accent across ticks. */
@@ -890,11 +901,12 @@ async function refresh() {
         const holderPid = candidate.leased
           ? candidate.holders?.[0]
           : sidecarPid(candidate.sidecar)
-        if (holderPid && table) inferred = inferSourceFromTable(holderPid, table)
+        if (candidate.leased) inferred = desktopSource(desktops, candidate.holders)
+        if (!inferred && holderPid && table) inferred = inferSourceFromTable(holderPid, table)
         if (inferred) noteSourceProbe('cim')
         else if (explicitSourceValue(candidate.sidecar)) noteSourceProbe('sidecar')
       } else if (!explicitSourceValue(candidate.sidecar) && candidate.holders && candidate.holders.length > 0) {
-        inferred = await inferSource(candidate.holders[0])
+        inferred = desktopSource(desktops, candidate.holders) || await inferSource(candidate.holders[0])
       }
       if (candidate.sidecarInfluenced) sidecarInfluenced = true
       return { header, state: record.state, sidecar: candidate.sidecar, inferred, project: candidate.entry.project }
