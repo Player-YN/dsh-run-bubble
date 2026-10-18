@@ -99,8 +99,8 @@ It is useful when you:
       <br><sub><b>Two sources at once.</b> Codex and Claude Code roots with task previews.</sub>
     </td>
     <td width="50%">
-      <img src="docs/images/idle.png" alt="Idle bubble showing no external tasks">
-      <br><sub><b>Idle, still there.</b> A muted “空闲” pill instead of disappearing.</sub>
+      <img src="docs/images/pill.png" alt="Tiny idle bubble showing no external tasks" width="110">
+      <br><sub><b>Idle, still there.</b> A content-sized 55 × 26 pill instead of disappearing.</sub>
     </td>
   </tr>
 </table>
@@ -141,7 +141,7 @@ cd dsh-run-bubble
 ./run-bubble status
 ```
 
-`install --rebuild` compiles `overlay.swift`, copies the daemon and binary to
+`install --rebuild` compiles `overlay.swift`, copies the daemon, `src/` modules and binary to
 `~/Library/Application Support/dsh-run-bubble/`, writes two user LaunchAgents,
 and starts both. No `sudo` is required.
 

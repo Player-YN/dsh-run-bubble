@@ -849,9 +849,9 @@ async function refresh() {
           candidate.holders = holders
           // No holder means the run is gone; do not decode its log at all.
           if (holders && holders.length === 0) continue
-          // Skip sessions owned by this machine's desktop host; the daemon is
-          // for terminal-driven runs. When no desktop is running, all count.
-          if (holders && holders.some((pid) => desktops.has(pid))) continue
+          // Skip sessions owned by this machine's desktop host unless the
+          // panel's monitor toggle (config.json includeDesktop) asks for them.
+          if (!includeDesktop && holders && holders.some((pid) => desktops.has(pid))) continue
           candidate.keep = true
         }
         candidates.push(candidate)
@@ -1032,7 +1032,7 @@ async function refresh() {
       leaseProbe: leaseProbeState,
       sourceProbe: IS_WIN ? sourceProbe : 'none',
       includeAmbiguous: IS_WIN ? (!leaseUsed && includeAmbiguous) : false,
-      includeDesktop: IS_WIN ? includeDesktop : false
+      includeDesktop
     }))
   } catch (error) {
     logThrottled('state-write', `daemon.json: ${String(error?.message || error)}`)

@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-19
+
+### Added
+
+- **macOS parity with the 0.3.1 panel.** The native overlay now has the
+  content-sized 55 × 26 idle pill, the monitor button for desktop sessions, and
+  fullscreen auto-hide, all sharing `config.json` with the daemon.
+- macOS daemon honours `includeDesktop` / `RUN_BUBBLE_INCLUDE_DESKTOP`; the
+  panel's monitor toggle now changes the row set on the next refresh.
+- `daemon.json` reports `includeDesktop` on macOS as well as Windows.
+- Header now carries two 18 px icons (monitor, then pin); expanded time/badge
+  positions account for the pair.
+
+### Fixed
+
+- A hidden-for-fullscreen panel can no longer be resurrected by a status poll.
+
 ## [0.3.2] - 2026-10-19
 
 ### Fixed

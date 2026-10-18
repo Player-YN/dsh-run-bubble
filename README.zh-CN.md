@@ -97,8 +97,8 @@
       <br><sub><b>两个来源同时运行。</b>Codex 和 Claude Code 各有任务预览。</sub>
     </td>
     <td width="50%">
-      <img src="docs/images/idle.png" alt="空闲态气泡">
-      <br><sub><b>空闲也不消失。</b>低调的“空闲”胶囊。</sub>
+      <img src="docs/images/pill.png" alt="空闲态小胶囊" width="110">
+      <br><sub><b>空闲也不消失。</b>内容自适应 55 × 26 小胶囊。</sub>
     </td>
   </tr>
 </table>
@@ -371,8 +371,9 @@ flowchart LR
   C#/.NET 8 + 分层 Win32 窗口（`src/overlay/`）。daemon 与 `status.json` 契约共用。
 - **仅外部会话。** 桌面端聊天会话默认被过滤，避免重复；面板的显示器按钮或
   `config.json` 里的 `"includeDesktop": true` 可随时把它们放回来。
-- **全屏识别基于窗口矩形。** 无边框全屏与普通全屏都能可靠识别；使用*独占* DirectX
-  全屏的游戏会把桌面切走，此时气泡本来就不可见（无需处理）。
+- **全屏识别基于窗口矩形。** macOS 用 `CGWindowList` 找铺满气泡所在显示器的前台窗口；
+  Windows 对无边框/普通全屏识别可靠。使用*独占* DirectX 全屏的游戏会把桌面切走，
+  此时气泡本来就不可见（无需处理）。
 - **Windows 活跃性依赖探针。** 租约探测需要 `DshLeaseProbe.exe`；缺失时降级为
   `mtime`/sidecar 启发式（`mode: "win-mtime"`），对长时间静默的会话可能短暂误判。
   不经 `interop/dsh-chat` 启动的外部 `dsh --profile acp` 没有 sidecar，来源在探针

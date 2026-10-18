@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
 // MARK: - Model
@@ -148,6 +149,56 @@ func truncate(_ value: String, _ limit: Int) -> String {
     return String(value.prefix(max(1, limit - 1))) + "…"
 }
 
+// MARK: - Shared runtime config
+
+struct RuntimeConfig {
+    var includeDesktop = false
+    var hideOnFullscreen = true
+}
+
+func runBubbleStateDirectory() -> URL {
+    if let dir = ProcessInfo.processInfo.environment["RUN_BUBBLE_STATUS_DIR"], !dir.isEmpty {
+        return URL(fileURLWithPath: dir)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".dsh/run-bubble")
+}
+
+func runtimeConfigURL() -> URL {
+    runBubbleStateDirectory().appendingPathComponent("config.json")
+}
+
+func readRuntimeConfig() -> RuntimeConfig {
+    var config = RuntimeConfig()
+    guard let data = try? Data(contentsOf: runtimeConfigURL()),
+          let object = try? JSONSerialization.jsonObject(with: data),
+          let dict = object as? [String: Any] else { return config }
+    if let value = dict["includeDesktop"] as? Bool { config.includeDesktop = value }
+    if let value = dict["hideOnFullscreen"] as? Bool { config.hideOnFullscreen = value }
+    return config
+}
+
+func writeRuntimeConfig(_ config: RuntimeConfig) {
+    let url = runtimeConfigURL()
+    var dict = [String: Any]()
+    if let data = try? Data(contentsOf: url),
+       let object = try? JSONSerialization.jsonObject(with: data),
+       let existing = object as? [String: Any] {
+        dict = existing
+    }
+    dict["includeDesktop"] = config.includeDesktop
+    dict["hideOnFullscreen"] = config.hideOnFullscreen
+    guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return }
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let temp = url.appendingPathExtension("tmp-\(getpid())")
+    do {
+        try data.write(to: temp, options: .atomic)
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    } catch {
+        try? data.write(to: url, options: .atomic)
+    }
+}
+
 // MARK: - Bubble view
 
 final class BubbleView: NSView {
@@ -198,10 +249,28 @@ final class BubbleView: NSView {
         return button
     }()
 
+    private lazy var desktopButton: NSButton = {
+        let button = NSButton()
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.target = self
+        button.action = #selector(toggleDesktopSessions)
+        button.toolTip = "显示/隐藏桌面端会话"
+        return button
+    }()
+
     private let pad: CGFloat = 12
     private let headerH: CGFloat = 30
     private let maxPanelHeight: CGFloat = 420
     private let footerH: CGFloat = 28
+    private let collapsedHeight: CGFloat = 26
+    private let collapsedMinWidth: CGFloat = 52
+    private let collapsedMaxWidth: CGFloat = 238
+    private let pillPad: CGFloat = 9
+    private let pillDot: CGFloat = 7
+    private let pillGap: CGFloat = 7
+    private let pillLabelX: CGFloat = 23
 
     override var isFlipped: Bool { false }
     override var acceptsFirstResponder: Bool { true }
@@ -225,7 +294,9 @@ final class BubbleView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        addSubview(desktopButton)
         addSubview(pinButton)
+        desktopButton.isHidden = true
         pinButton.isHidden = true
     }
 
@@ -234,6 +305,7 @@ final class BubbleView: NSView {
     override func layout() {
         super.layout()
         let size: CGFloat = 18
+        desktopButton.frame = NSRect(x: bounds.width - 54, y: bounds.height - 24, width: size, height: size)
         pinButton.frame = NSRect(x: bounds.width - 32, y: bounds.height - 24, width: size, height: size)
     }
 
@@ -252,13 +324,49 @@ final class BubbleView: NSView {
         needsDisplay = true
     }
 
-    private func updatePinButton() {
+    func updateHeaderButtons() {
+        let panel = window as? BubblePanel
         pinButton.isHidden = !expanded
-        pinButton.frame = NSRect(x: bounds.width - 32, y: bounds.height - 24, width: 18, height: 18)
-        let symbol = (window as? BubblePanel)?.pinned == true ? "pin.fill" : "pin"
-        pinButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "钉住")
-        pinButton.contentTintColor = (window as? BubblePanel)?.pinned == true ? accent : muted
+        desktopButton.isHidden = !expanded
+        let size: CGFloat = 18
+        pinButton.frame = NSRect(x: bounds.width - 32, y: bounds.height - 24, width: size, height: size)
+        desktopButton.frame = NSRect(x: bounds.width - 54, y: bounds.height - 24, width: size, height: size)
+
+        let pinned = panel?.pinned == true
+        pinButton.image = NSImage(systemSymbolName: pinned ? "pin.fill" : "pin", accessibilityDescription: "钉住")
+        pinButton.contentTintColor = pinned ? accent : muted
+
+        let includeDesktop = panel?.includeDesktop == true
+        desktopButton.image = NSImage(systemSymbolName: "display", accessibilityDescription: "桌面端会话")
+        desktopButton.contentTintColor = includeDesktop ? accent : muted
+        desktopButton.toolTip = includeDesktop ? "隐藏桌面端会话" : "显示桌面端会话"
         needsLayout = true
+    }
+
+    @objc private func toggleDesktopSessions() {
+        guard let panel = window as? BubblePanel else { return }
+        panel.includeDesktop.toggle()
+        panel.persistConfig()
+        hoverSuppressUntil = Date().addingTimeInterval(0.35)
+        updateHeaderButtons()
+        needsDisplay = true
+    }
+
+    func preferredWidth() -> CGFloat {
+        guard !expanded else { return 356 }
+        let parts = headerParts()
+        let headerAttrs = attrs(size: 11.5, weight: .semibold, color: fg)
+        let timeAttrs = attrs(size: 11.5, weight: .semibold, color: fg, mono: true)
+        let badgeAttrs = attrs(size: 9.5, weight: .semibold, color: muted)
+        var width = pillPad + pillDot + pillGap + measure(parts.label, headerAttrs)
+        if !parts.badge.isEmpty {
+            width += 8 + measure(parts.badge, badgeAttrs) + 8
+        }
+        if !parts.time.isEmpty {
+            width += 8 + measure(parts.time, timeAttrs)
+        }
+        width += pillPad
+        return min(collapsedMaxWidth, max(collapsedMinWidth, width))
     }
 
     override func updateTrackingAreas() {
@@ -273,7 +381,7 @@ final class BubbleView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if pinButton.frame.contains(point) { return }
+        if pinButton.frame.contains(point) || desktopButton.frame.contains(point) { return }
         toggleRootId = rootId(at: point)
         pendingDrag = true
         isDragging = false
@@ -486,7 +594,7 @@ final class BubbleView: NSView {
     }
 
     func preferredHeight(expanded: Bool) -> CGFloat {
-        guard expanded else { return 42 }
+        guard expanded else { return collapsedHeight }
         let rows = makeRows()
         let natural = headerH + contentHeight(rows) + (isIdle ? 0 : footerH) + 14
         return min(maxPanelHeight, max(96, natural))
@@ -498,6 +606,103 @@ final class BubbleView: NSView {
 
     private func bodyBottomY() -> CGFloat {
         (isIdle ? 0 : footerH) + 6
+    }
+
+
+    private struct HeaderParts {
+        let label: String
+        let time: String
+        let badge: String
+    }
+
+    private func headerParts() -> HeaderParts {
+        let idle = isIdle
+        let label = idle ? "空闲" : (roots.count == 1 ? "外部任务运行中" : "\(roots.count) 个外部任务")
+        let time = idle ? (expanded ? "—" : "") : duration(maxElapsed)
+        let badge = activeChildren.count > 0 && (expanded || !idle) ? "\(activeChildren.count) 子" : ""
+        return HeaderParts(label: label, time: time, badge: badge)
+    }
+
+    private func measure(_ text: String, _ attributes: [NSAttributedString.Key: Any]) -> CGFloat {
+        (text as NSString).size(withAttributes: attributes).width
+    }
+
+    private func truncatedToWidth(_ text: String, maxWidth: CGFloat, attributes: [NSAttributedString.Key: Any]) -> String {
+        guard measure(text, attributes) > maxWidth else { return text }
+        var value = text
+        while !value.isEmpty, measure(value + "…", attributes) > maxWidth {
+            value.removeLast()
+        }
+        return value.isEmpty ? "" : value + "…"
+    }
+
+    private func drawCollapsedPill() {
+        pinButton.isHidden = true
+        desktopButton.isHidden = true
+
+        let parts = headerParts()
+        let headerAttrs = attrs(size: 11.5, weight: .semibold, color: isIdle ? muted : fg)
+        let timeAttrs = attrs(size: 11.5, weight: .semibold, color: fg, mono: true)
+        let badgeAttrs = attrs(size: 9.5, weight: .semibold, color: muted)
+        let font = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
+        let lineHeight = font.ascender - font.descender + font.leading
+        let textTop = (bounds.height - lineHeight) / 2 + 1.5
+
+        let dotRect = NSRect(x: pillPad, y: (bounds.height - pillDot) / 2, width: pillDot, height: pillDot)
+        (isIdle ? muted.withAlphaComponent(0.55) : accent.withAlphaComponent(0.95 * pulse + 0.05)).setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+
+        let timeWidth = parts.time.isEmpty ? 0 : measure(parts.time, timeAttrs)
+        let right = bounds.width - pillPad
+        let timeLeft = right - timeWidth
+        let badgeWidth = parts.badge.isEmpty ? 0 : measure(parts.badge, badgeAttrs) + 8
+        let badgeRight = parts.time.isEmpty ? right : timeLeft - 8
+        let contentRight = parts.badge.isEmpty ? (parts.time.isEmpty ? right : timeLeft) : badgeRight - badgeWidth
+        let hasRight = !parts.badge.isEmpty || !parts.time.isEmpty
+        let labelLimit = max(1, contentRight - (hasRight ? 6 : 0) - pillLabelX)
+        let label = truncatedToWidth(parts.label, maxWidth: labelLimit, attributes: headerAttrs)
+        drawText(label, x: pillLabelX, top: textTop, attrs: headerAttrs)
+
+        if !parts.time.isEmpty {
+            drawRight(parts.time, right: right, top: textTop, attrs: timeAttrs)
+        }
+
+        if !parts.badge.isEmpty {
+            let badgeRect = NSRect(x: badgeRight - badgeWidth, y: (bounds.height - 14) / 2, width: badgeWidth, height: 14)
+            NSColor(calibratedWhite: isDark ? 1 : 0, alpha: isDark ? 0.08 : 0.06).setFill()
+            NSBezierPath(roundedRect: badgeRect, xRadius: 7, yRadius: 7).fill()
+            drawText(parts.badge, x: badgeRect.minX + 4, top: badgeRect.minY + 2, attrs: badgeAttrs)
+        }
+    }
+
+    private func drawExpandedHeader() {
+        let parts = headerParts()
+        let headerAttrs = attrs(size: 11.5, weight: .semibold, color: isIdle ? muted : fg)
+        let timeAttrs = attrs(size: 11.5, weight: .semibold, color: fg, mono: true)
+        let badgeAttrs = attrs(size: 9.5, weight: .semibold, color: muted)
+        let timeWidth = measure(parts.time, timeAttrs)
+        let timeRight = bounds.width - 14 - 44
+        let badgeRight = timeRight - timeWidth - 8
+        let badgeWidth = parts.badge.isEmpty ? 0 : measure(parts.badge, badgeAttrs) + 8
+
+        let dotRect = NSRect(x: pad, y: bounds.height - 16, width: 7, height: 7)
+        (isIdle ? muted.withAlphaComponent(0.55) : accent.withAlphaComponent(0.95 * pulse + 0.05)).setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+
+        var labelLimit = timeRight - 6 - (pad + 13)
+        if !parts.badge.isEmpty { labelLimit = min(labelLimit, badgeRight - badgeWidth - 6 - (pad + 13)) }
+        let label = truncatedToWidth(parts.label, maxWidth: labelLimit, attributes: headerAttrs)
+        drawText(label, x: pad + 13, top: 7, attrs: headerAttrs)
+        drawRight(parts.time, right: timeRight, top: 7, attrs: timeAttrs)
+
+        if !parts.badge.isEmpty {
+            let badgeRect = NSRect(x: badgeRight - badgeWidth, y: bounds.height - 21, width: badgeWidth, height: 14)
+            NSColor(calibratedWhite: isDark ? 1 : 0, alpha: isDark ? 0.08 : 0.06).setFill()
+            NSBezierPath(roundedRect: badgeRect, xRadius: 7, yRadius: 7).fill()
+            drawText(parts.badge, x: badgeRect.minX + 4, top: 7.5, attrs: badgeAttrs)
+        }
+
+        updateHeaderButtons()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -512,39 +717,13 @@ final class BubbleView: NSView {
         path.lineWidth = 1
         path.stroke()
 
-        let idle = isIdle
-        let label = idle ? "空闲" : (roots.count == 1 ? "外部任务运行中" : "\(roots.count) 个外部任务")
-        let badge = activeChildren.count > 0 ? "\(activeChildren.count) 子" : ""
-        let headerTop: CGFloat = expanded ? 7 : 13
-        let timeText = idle ? "—" : duration(maxElapsed)
-        let timeAttrs = attrs(size: 11.5, weight: .semibold, color: fg, mono: true)
-        let timeWidth = (timeText as NSString).size(withAttributes: timeAttrs).width
-
-        let dotY: CGFloat = expanded ? bounds.height - 16 : (bounds.height - 7) / 2
-        let dotRect = NSRect(x: pad, y: dotY, width: 7, height: 7)
-        (idle ? muted.withAlphaComponent(0.55) : accent.withAlphaComponent(0.95 * pulse + 0.05)).setFill()
-        NSBezierPath(ovalIn: dotRect).fill()
-
-        drawText(truncate(label, 18), x: pad + 13, top: headerTop, attrs: attrs(size: 11.5, weight: .semibold, color: idle ? muted : fg))
-        let timeRight = bounds.width - 14 - (expanded ? 22 : 0)
-        drawRight(timeText, right: timeRight, top: headerTop, attrs: timeAttrs)
-        updatePinButton()
-
-        if !badge.isEmpty {
-            let badgeAttrs = attrs(size: 9.5, weight: .semibold, color: muted)
-            let size = (badge as NSString).size(withAttributes: badgeAttrs)
-            let badgeRight = bounds.width - 14 - (expanded ? 22 : 0) - timeWidth - 8
-            let badgeY = expanded ? bounds.height - 21 : (bounds.height - 14) / 2
-            let badgeRect = NSRect(x: badgeRight - size.width - 8, y: badgeY, width: size.width + 8, height: 14)
-            NSColor(calibratedWhite: isDark ? 1 : 0, alpha: isDark ? 0.08 : 0.06).setFill()
-            NSBezierPath(roundedRect: badgeRect, xRadius: 7, yRadius: 7).fill()
-            drawText(badge, x: badgeRect.minX + 4, top: expanded ? 7.5 : 13.5, attrs: badgeAttrs)
-        }
-
-        guard expanded else {
+        if !expanded {
+            drawCollapsedPill()
             ctx.restoreGraphicsState()
             return
         }
+
+        drawExpandedHeader()
 
         border.withAlphaComponent(0.7).setStroke()
         let sep = NSBezierPath()
@@ -553,6 +732,7 @@ final class BubbleView: NSView {
         sep.lineWidth = 1
         sep.stroke()
 
+        let idle = isIdle
         let rows = makeRows()
         let content = contentHeight(rows)
         let viewport = max(0, bounds.height - (headerH + 8) - ((idle ? 0 : footerH) + 6))
@@ -712,11 +892,16 @@ final class BubblePanel: NSPanel {
     private var isUserDragging = false
     private var lastAnchorSave = Date.distantPast
     var pinned = false
+    var includeDesktop = false
+    var hideOnFullscreen = true
+    var fullscreenChecksEnabled = true
+    private var configKey = ""
+    private var hiddenForFullscreen = false
 
     init() {
-        bubbleView = BubbleView(frame: NSRect(x: 0, y: 0, width: 238, height: 42))
+        bubbleView = BubbleView(frame: NSRect(x: 0, y: 0, width: 238, height: 26))
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 238, height: 42),
+            contentRect: NSRect(x: 0, y: 0, width: 238, height: 26),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -732,6 +917,10 @@ final class BubblePanel: NSPanel {
         contentView = bubbleView
         anchor = loadAnchor()
         pinned = loadPinned()
+        let config = readRuntimeConfig()
+        includeDesktop = config.includeDesktop
+        hideOnFullscreen = config.hideOnFullscreen
+        configKey = configStamp()
         if anchor != nil && screenFor(point: anchor!) == nil { anchor = nil }
     }
 
@@ -757,13 +946,13 @@ final class BubblePanel: NSPanel {
             lastNonEmptyAt = Date()
         }
         resize(expanded: bubbleView.expanded)
-        orderFrontRegardless()
+        if !hiddenForFullscreen { orderFrontRegardless() }
         bubbleView.needsDisplay = true
     }
 
     func resize(expanded: Bool) {
         guard !isUserDragging else { return }
-        let width: CGFloat = expanded ? 356 : 238
+        let width: CGFloat = expanded ? 356 : bubbleView.preferredWidth()
         let height = bubbleView.preferredHeight(expanded: expanded)
         let screen = anchor.flatMap { screenFor(point: $0) } ?? targetScreen()
         guard let screen else { return }
@@ -815,6 +1004,94 @@ final class BubblePanel: NSPanel {
         let point = NSPoint(x: frame.maxX, y: frame.minY)
         anchor = point
         saveAnchor(point)
+    }
+
+    func reloadConfigIfNeeded() {
+        let stamp = configStamp()
+        guard stamp != configKey else { return }
+        configKey = stamp
+        let config = readRuntimeConfig()
+        let changed = config.includeDesktop != includeDesktop || config.hideOnFullscreen != hideOnFullscreen
+        includeDesktop = config.includeDesktop
+        hideOnFullscreen = config.hideOnFullscreen
+        if changed {
+            bubbleView.updateHeaderButtons()
+            bubbleView.needsDisplay = true
+        }
+    }
+
+    func persistConfig() {
+        writeRuntimeConfig(RuntimeConfig(includeDesktop: includeDesktop, hideOnFullscreen: hideOnFullscreen))
+        configKey = configStamp()
+    }
+
+    private func configStamp() -> String {
+        let url = runtimeConfigURL()
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return "" }
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(size):\(modified)"
+    }
+
+    /// Hide while another app owns a true fullscreen window on the bubble's
+    /// monitor. A maximised window only covers visibleFrame, so it never hides.
+    func updateFullscreenVisibility() {
+        guard fullscreenChecksEnabled else {
+            if hiddenForFullscreen { restoreFromFullscreen() }
+            return
+        }
+        let shouldHide = hideOnFullscreen && isFullscreenForegroundOnBubbleScreen()
+        guard shouldHide != hiddenForFullscreen else { return }
+        hiddenForFullscreen = shouldHide
+        if shouldHide {
+            orderOut(nil)
+        } else {
+            restoreFromFullscreen()
+        }
+    }
+
+    private func restoreFromFullscreen() {
+        hiddenForFullscreen = false
+        orderFrontRegardless()
+        bubbleView.needsDisplay = true
+    }
+
+    private func isFullscreenForegroundOnBubbleScreen() -> Bool {
+        guard let front = NSWorkspace.shared.frontmostApplication,
+              front.processIdentifier != getpid() else { return false }
+        let ignored = [
+            "com.apple.dock", "com.apple.controlcenter", "com.apple.notificationcenterui",
+            "com.apple.WindowManager", "com.apple.systemuiserver"
+        ]
+        if let bundle = front.bundleIdentifier, ignored.contains(bundle) { return false }
+        guard let screen = self.screen ?? NSScreen.main,
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return false
+        }
+        let display = CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+        guard let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+        let pid = front.processIdentifier
+        for info in windows {
+            guard let owner = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  owner.int32Value == pid else { continue }
+            guard let layer = info[kCGWindowLayer as String] as? NSNumber, layer.intValue == 0 else { continue }
+            if let alpha = info[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue <= 0.01 { continue }
+            guard let box = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = (box["X"] as? NSNumber)?.doubleValue,
+                  let y = (box["Y"] as? NSNumber)?.doubleValue,
+                  let width = (box["Width"] as? NSNumber)?.doubleValue,
+                  let height = (box["Height"] as? NSNumber)?.doubleValue else { continue }
+            let tolerance: CGFloat = 2
+            if x <= display.minX + tolerance,
+               y <= display.minY + tolerance,
+               x + width >= display.maxX - tolerance,
+               y + height >= display.maxY - tolerance {
+                return true
+            }
+        }
+        return false
     }
 
     private func targetScreen() -> NSScreen? {
@@ -876,6 +1153,7 @@ struct RunBubbleApp {
 
         let panel = BubblePanel()
         panel.ignoresMouseEvents = snapshotPath != nil
+        panel.fullscreenChecksEnabled = snapshotPath == nil && !demo && !demoMany && !demoSameTitle && !demoIdle
         panel.bubbleView.suppressHover = snapshotPath != nil
         panel.bubbleView.expanded = panel.pinned || ((demo || demoMany || demoSameTitle || demoIdle || snapshotPath != nil) && !collapsed)
         panel.resize(expanded: panel.bubbleView.expanded)
@@ -922,6 +1200,8 @@ struct RunBubbleApp {
 
         func reload() {
             if demo || demoMany || demoSameTitle || demoIdle { return }
+            panel.reloadConfigIfNeeded()
+            panel.updateFullscreenVisibility()
             guard let data = try? Data(contentsOf: statusURL),
                   let object = try? JSONSerialization.jsonObject(with: data),
                   let dict = object as? [String: Any] else {
