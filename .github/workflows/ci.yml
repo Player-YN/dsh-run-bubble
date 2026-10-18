@@ -88,7 +88,7 @@ jobs:
             @{ args = @('--demo-many', '--collapse-first');      file = 'collapse.png' },
             @{ args = @('--demo-many', '--scroll', '120');       file = 'scroll.png' }
           )
-          $dir = Join-Path $env:TEMP 'rb-shots'
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'artifacts\snapshots'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           foreach ($case in $cases) {
             $target = Join-Path $dir $case.file
@@ -109,7 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-snapshots
-          path: ${{ runner.temp }}/rb-shots/*.png
+          path: artifacts/snapshots/*.png
           if-no-files-found: warn
 
       - name: PowerShell syntax check
