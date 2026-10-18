@@ -86,6 +86,8 @@ install_all() {
   [ -n "$ZSTD" ] || die "zstd not found; run: brew install zstd"
   compile_overlay "$@"
   mkdir -p "$SUPPORT" "$LOGS"
+  rm -rf "$SUPPORT/src"
+  cp -R "$ROOT/src" "$SUPPORT/src"
   cp "$ROOT/daemon.mjs" "$SUPPORT/daemon.mjs"
   cp "$ROOT/RunBubbleOverlay" "$SUPPORT/RunBubbleOverlay"
   chmod 755 "$SUPPORT/RunBubbleOverlay"

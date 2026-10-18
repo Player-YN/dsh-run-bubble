@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-19
+
+### Fixed
+
+- Status gaps that made the bubble fall back to idle while external sessions were
+  still running. macOS liveness is now one **bulk `lsof`** per refresh instead of
+  one `lsof` process per session (80+ sessions => 20s+ refresh stalls), and a 1s
+  heartbeat keeps `status.json` fresh while a refresh is busy.
+- The macOS installer now ships `src/` alongside `daemon.mjs`; the cross-platform
+  daemon imports `src/win/*` even on macOS.
+
 ## [0.3.1] - 2026-10-18
 
 ### Added

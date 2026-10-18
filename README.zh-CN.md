@@ -249,8 +249,10 @@ flowchart LR
 2. 一次折叠每条日志：标题、模型、推理强度、turn 边界、token、子 Agent 描述和最后事件
    时间；不保留事件数组。日志是**每追加一次就写一帧**的多帧 zstd，解帧器逐帧走，
    不能只解第一帧。
-3. 活跃性来自**真实会话租约**而不是猜测：macOS 用 `lsof` 读 `session.lock` 持有者；
-   Windows 让 `DshLeaseProbe.exe` 读 DSH 为每个会话创建的内核信号量
+3. 活跃性来自**真实会话租约**而不是猜测：macOS 每次 refresh 用**一次批量
+   `lsof`** 读所有 `session.lock` 持有者（不是每个 session 一个进程；另有 1s
+   heartbeat，refresh 慢时 status 也不会变旧）；Windows 让 `DshLeaseProbe.exe`
+   读 DSH 为每个会话创建的内核信号量
    （`Local\dsh-session-lock-<sha256>`）的持有者。没人持有 = 进程已死。探针不可用时
    降级为 `mtime`/sidecar 启发式，并在 `daemon.json` 标记 `"mode": "win-mtime"`。
 4. 如果会话租约由 DSH 桌面端持有，则跳过，避免和桌面端重复。

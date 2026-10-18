@@ -263,7 +263,9 @@ flowchart LR
    retains the event array. Logs are concatenated zstd frames — one per append —
    so the decoder walks frames instead of trusting a single-frame decompress.
 3. Liveness comes from the platform's **real session lease**, not a guess: macOS
-   reads the `session.lock` holder with `lsof`; Windows asks `DshLeaseProbe.exe`
+   reads every `session.lock` holder in one **bulk `lsof`** call per refresh (not
+   one process per session); a 1 s heartbeat keeps `status.json` fresh if a
+   refresh is slow. Windows asks `DshLeaseProbe.exe`
    for the holder of the named kernel semaphore DSH creates per session
    (`Local\dsh-session-lock-<sha256>`). No holder means the run is gone. If the
    probe cannot run, the daemon degrades to a `mtime`/sidecar heuristic and says

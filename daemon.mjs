@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -459,24 +459,64 @@ async function desktopPids() {
   return value
 }
 
-/** Holder PIDs for a session lock; `null` means the check was unavailable. */
-async function lockHolders(lockPath) {
-  // Windows has no cross-process session lock at all; the no-lock heuristics in
-  // src/win/liveness.mjs replace it.
+/**
+ * Holder PIDs for every session lock in one lsof pass (darwin).
+ *
+ * `lsof` startup costs ~0.3s on this machine. Spawning it once per session
+ * (80+ sessions => 20s+) blocks the refresh loop, makes status.json stale, and
+ * the overlay's stale guard then flips to idle. One bulk call keeps each
+ * refresh under ~1s; `null` remains the "check unavailable" fallback.
+ *
+ * Windows has no cross-process session lock; the lease probe / heuristics in
+ * src/win/liveness.mjs replace this path.
+ */
+async function lockHoldersFor(entries) {
   if (IS_WIN) return null
   const now = Date.now()
-  const cached = holderCache.get(lockPath)
-  if (cached && now - cached.at < 4000) return cached.value
+  const paths = entries
+    .map((entry) => join(entry.dir, 'session.lock'))
+    .filter((lockPath) => existsSync(lockPath))
+  const key = paths.join('\0')
+  if (bulkHolderCache.value !== null && bulkHolderCache.key === key && now - bulkHolderCache.at < 3000) {
+    return bulkHolderCache.value
+  }
+
   let value = null
-  if (process.platform === 'darwin') {
+  if (paths.length === 0) {
+    value = new Map()
+  } else if (process.platform === 'darwin') {
+    let stdout = ''
+    let unavailable = false
     try {
-      const { stdout } = await execFileAsync('lsof', ['-t', lockPath], { timeout: 1500 })
-      value = stdout.trim().split(/\s+/).filter(Boolean).map(Number)
+      ({ stdout } = await execFileAsync('lsof', ['-F', 'pn', '--', ...paths], {
+        timeout: 5000,
+        maxBuffer: 8 * 1024 * 1024
+      }))
     } catch (error) {
-      value = error?.code === 1 ? [] : null
+      // lsof exits 1 when *some* requested paths have no match, while still
+      // printing the paths that do have holders. Keep that stdout; only treat
+      // it as unavailable when the error produced neither output nor exit 1.
+      stdout = typeof error?.stdout === 'string' ? error.stdout : ''
+      if (!stdout && error?.code !== 1) unavailable = true
+    }
+    if (unavailable) {
+      value = null
+    } else {
+      value = new Map(paths.map((lockPath) => [lockPath, []]))
+      let currentPid = null
+      for (const line of stdout.split('\n')) {
+        if (!line) continue
+        if (line[0] === 'p') {
+          currentPid = Number(line.slice(1)) || null
+        } else if (line[0] === 'n' && currentPid) {
+          const lockPath = line.slice(1)
+          if (value.has(lockPath)) value.get(lockPath).push(currentPid)
+        }
+      }
     }
   }
-  holderCache.set(lockPath, { at: now, value })
+
+  bulkHolderCache = { at: now, key, value }
   return value
 }
 
@@ -634,7 +674,7 @@ function publicInfo(info) {
 }
 
 let cache = new Map()
-let holderCache = new Map()
+let bulkHolderCache = { at: 0, key: '', value: null }
 let sourceCache = new Map()
 let desktopPidsCache = { at: 0, value: new Set() }
 let refreshing = false
@@ -672,6 +712,18 @@ async function writeAtomic(filePath, data) {
     rmSync(temp, { force: true })
   } catch {}
   return false
+}
+
+/** Serialize status writes so a heartbeat can never clobber a newer refresh. */
+let statusWriteChain = Promise.resolve()
+function writeStatusSnapshot(snapshot) {
+  const data = JSON.stringify(snapshot)
+  statusWriteChain = statusWriteChain
+    .then(() => writeAtomic(STATUS_FILE, data))
+    .catch((error) => {
+      logThrottled('status-write', `status.json: ${String(error?.message || error)}`)
+    })
+  return statusWriteChain
 }
 
 async function refresh() {
@@ -712,6 +764,8 @@ async function refresh() {
     const pidChain = table ? (pid) => parentChain(pid, 8, table) : null
     const pidAlive = table ? (pid) => table.has(pid) : null
     const entries = listLogs()
+    // One bulk lsof for all lock files, not one process per session.
+    const holdersByPath = IS_WIN ? null : await lockHoldersFor(entries)
 
     // Guard: a probe that reports no lease for ANY session of this store is not
     // describing this store (synthetic/temporary DSH_HOME in tests, or a store
@@ -791,7 +845,7 @@ async function refresh() {
           }
         } else {
           const lockPath = join(entry.dir, 'session.lock')
-          const holders = await lockHolders(lockPath)
+          const holders = holdersByPath ? (holdersByPath.get(lockPath) ?? []) : null
           candidate.holders = holders
           // No holder means the run is gone; do not decode its log at all.
           if (holders && holders.length === 0) continue
@@ -963,7 +1017,7 @@ async function refresh() {
 
   try {
     mkdirSync(STATUS_DIR, { recursive: true })
-    await writeAtomic(STATUS_FILE, JSON.stringify(lastSnapshot))
+    await writeStatusSnapshot(lastSnapshot)
   } catch (error) {
     logThrottled('status-write', `status.json: ${String(error?.message || error)}`)
   }
@@ -996,6 +1050,17 @@ await refresh()
 setInterval(() => {
   void refresh()
 }, TICK_MS)
+
+// Keep status.json fresh even if a busy refresh is slow. The overlay treats a
+// status file older than a few seconds as stale and would otherwise flash back
+// to idle while the daemon is still collecting data.
+setInterval(() => {
+  if (lastSnapshot.roots.length === 0) return
+  const now = Date.now()
+  if (now - lastSnapshot.updatedAt < 800) return
+  lastSnapshot.updatedAt = now
+  void writeStatusSnapshot(lastSnapshot)
+}, 1000)
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
