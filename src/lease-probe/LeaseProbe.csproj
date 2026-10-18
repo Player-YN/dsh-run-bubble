@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>DshLeaseProbe</AssemblyName>
+    <RootNamespace>DshLeaseProbe</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.3.0</Version>
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <!--
+    The probe must run at Medium integrity: NtQuerySystemInformation(SystemExtendedHandleInformation)
+    is denied (STATUS_ACCESS_DENIED) to Low-integrity processes. A DSH/Codex-style Windows sandbox
+    labels its workspace tree with a Low mandatory integrity label, and a process launched from a
+    Low-labelled image runs at min(parent integrity, image label) - i.e. Low. Files published under
+    such a workspace therefore inherit Low and silently lose the ability to scan handles.
+
+    Relabel the published executable to Medium so `dist\DshLeaseProbe.exe` also works when it is
+    launched directly from inside a sandboxed workspace. This is a no-op on normal machines, where
+    ordinary files are already Medium. The freshly published DLL/runtimeconfig files do not need a
+    label: only the process token's integrity matters and it is derived from the image file.
+  -->
+  <Target Name="DshLeaseProbeSetIntegrityLevel"
+          AfterTargets="Publish"
+          Condition="'$(OS)' == 'Windows_NT'"
+          Label="Relabel the published probe executable to Medium integrity (DSH sandboxed workspaces)">
+    <Exec Command="icacls &quot;$(PublishDir)$(AssemblyName).exe&quot; /setintegritylevel Medium &gt;nul"
+          ContinueOnError="true" />
+  </Target>
+
+</Project>

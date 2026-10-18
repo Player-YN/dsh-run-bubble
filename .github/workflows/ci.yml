@@ -6,15 +6,13 @@ on:
   pull_request:
 
 jobs:
-  build:
-    name: Build on macOS
+  macos:
+    name: macOS overlay + shared JS
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
@@ -22,6 +20,7 @@ jobs:
         run: |
           node --check daemon.mjs
           node --check interop/dsh-chat.mjs
+          for file in src/win/*.mjs; do node --check "$file"; done
 
       - name: Show toolchain
         run: |
@@ -31,3 +30,97 @@ jobs:
       - name: Compile AppKit overlay
         run: swiftc -O -parse-as-library -framework AppKit overlay.swift -o RunBubbleOverlay
 
+  windows:
+    name: Windows overlay + daemon
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check daemon.mjs
+          node --check interop/dsh-chat.mjs
+          Get-ChildItem src/win/*.mjs | ForEach-Object { node --check $_.FullName }
+        shell: pwsh
+
+      - name: Build overlay
+        run: dotnet build src/overlay/RunBubbleOverlay.csproj -c Release --nologo
+
+      - name: Build lease probe
+        run: dotnet build src/lease-probe/LeaseProbe.csproj -c Release --nologo
+
+      - name: Publish overlay
+        run: dotnet publish src/overlay/RunBubbleOverlay.csproj -c Release -r win-x64 --self-contained false -o dist --nologo
+
+      - name: Publish lease probe
+        run: dotnet publish src/lease-probe/LeaseProbe.csproj -c Release -r win-x64 --self-contained false -o dist/probe --nologo
+
+      - name: Lease probe self-check
+        run: |
+          $json = & ./dist/probe/DshLeaseProbe.exe | ConvertFrom-Json
+          if (-not $json.ok) { throw "lease probe reported ok=false: $($json.error)" }
+          Write-Host "scanMs=$($json.scanMs) handles=$($json.handles) semaphores=$($json.semaphores) leases=$($json.leases.Count)"
+        shell: pwsh
+
+      - name: Daemon smoke test (synthetic session store)
+        run: node tests/smoke.mjs
+        shell: pwsh
+        env:
+          RUN_BUBBLE_DISABLE_LEASE_PROBE: '1'
+
+      - name: Render demo snapshots
+        run: |
+          $cases = @(
+            @{ args = @('--demo');                               file = 'expanded.png' },
+            @{ args = @('--demo-many');                          file = 'many.png' },
+            @{ args = @('--demo-roots');                         file = 'roots.png' },
+            @{ args = @('--demo-idle');                          file = 'idle.png' },
+            @{ args = @('--demo-idle', '--collapsed');           file = 'pill.png' },
+            @{ args = @('--demo-many', '--collapse-first');      file = 'collapse.png' },
+            @{ args = @('--demo-many', '--scroll', '120');       file = 'scroll.png' }
+          )
+          $dir = Join-Path $env:TEMP 'rb-shots'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          foreach ($case in $cases) {
+            $target = Join-Path $dir $case.file
+            $args = $case.args + @('--snapshot', $target)
+            & ./dist/RunBubbleOverlay.exe @args
+            if ($LASTEXITCODE -ne 0) { throw "overlay exited $LASTEXITCODE for $($case.file)" }
+            if (-not (Test-Path $target)) { throw "missing snapshot $($case.file)" }
+            $image = [System.Drawing.Image]::FromFile($target)
+            Write-Host ("{0}: {1}x{2}" -f $case.file, $image.Width, $image.Height)
+            $image.Dispose()
+          }
+        shell: pwsh
+
+      - name: Upload snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-snapshots
+          path: |
+            ${{ env.TEMP }}/expanded.png
+            ${{ env.TEMP }}/pill.png
+          if-no-files-found: warn
+
+      - name: PowerShell syntax check
+        run: |
+          $files = @("run-bubble.ps1", "build.ps1") + (Get-ChildItem scripts/*.ps1 -ErrorAction SilentlyContinue | ForEach-Object FullName)
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { continue }
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Error "$f has parse errors: $($errors[0].Message)"
+              exit 1
+            }
+            Write-Host "ok $f"
+          }
+        shell: pwsh

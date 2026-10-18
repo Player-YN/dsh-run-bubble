@@ -6,6 +6,69 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+Windows port. The daemon and the `status.json` v2 contract are shared by both
+platforms; only the overlay and the service manager are platform specific.
+
+### Added
+
+- **Windows overlay** — `src/overlay/` (C#/.NET 8, WinForms + `UpdateLayeredWindow`):
+  always-on-top, non-activating, taskbar-free panel with per-pixel alpha, hover
+  expand, pin, 350 ms long-press drag, wheel scrolling, per-root collapse, idle
+  state, and `--demo*`/`--snapshot` modes for pixel-parity screenshots.
+- **`DshLeaseProbe.exe`** (`src/lease-probe/`) — read-only kernel handle-table
+  probe that resolves the real holder PID of a session's named kernel semaphore
+  lease (`Local\dsh-session-lock-<sha256>`). Gives Windows the same live/dead and
+  desktop/external attribution that macOS gets from `session.lock` + `lsof`.
+- **Windows launcher** — `run-bubble.ps1` (`install|start|stop|restart|status|
+  logs|snapshot|doctor|uninstall`) and `build.ps1`, with per-user Scheduled Tasks
+  (`DshRunBubble-Daemon`, `DshRunBubble-Overlay`, restart on failure, no
+  elevation) mirroring the launchd `KeepAlive` behaviour.
+- **Cross-platform interop** — `interop/dsh-chat.cmd`, `dsh-chat.ps1`,
+  `install.ps1`; the sidecar gained `pid`, `surface`, `heartbeatAt`, and
+  `sessionId` so the daemon can attribute an ACP run without guessing.
+- **`tests/`** — synthetic session-store fixture (one zstd frame per event, plus a
+  half-written trailing frame) and `tests/smoke.mjs` asserting the daemon contract
+  end to end.
+- **Docs** — `docs/PORT-WINDOWS.md` (design contract),
+  `docs/dsh-internals-windows.md` (reverse-engineering notes), Windows sections in
+  both READMEs.
+- Windows CI job (`windows-latest`): builds overlay + probe, runs the daemon smoke
+  test, and renders every demo snapshot.
+
+### Changed
+
+- `daemon.mjs` is now cross-platform: the macOS path keeps `lsof`/`ps`, the
+  Windows path uses one cached `Get-CimInstance` process-table query and the lease
+  probe.
+- Session ids are normalised: DSH writes both `session-<uuid>` and bare `<uuid>`,
+  so `shortId`/`colorKey` strip the optional prefix while grouping still matches on
+  the full string.
+- `fallbackTitle` splits `cwd` on both `/` and `\`, so Windows paths no longer
+  produce a one-line title of the whole path.
+- Task previews also come from `agent/inbox/spliced` (the current DSH build no
+  longer emits `user/message`), and child labels come from the parent's
+  `subagent/catalog` events.
+- Desktop-host detection normalises `\` to `/` before matching
+  `dsh-desktop-host/lib/index.js`; the old forward-slash match never fired on
+  Windows.
+
+### Fixed
+
+- **Multi-frame zstd**: DSH appends one zstd frame per event. `zlib.zstdDecompressSync`
+  and the stream API silently decode only the first frame, which would have shown
+  every session as empty with zero tokens. The Windows decoder walks frame headers
+  and keeps the prefix when a partially written frame is hit.
+- Atomic status writes retry on transient `EPERM` while the overlay is reading.
+
+### Notes
+
+- If the lease probe cannot run (missing binary, hardened environment), the daemon
+  degrades to an `mtime`/sidecar heuristic and reports `"mode": "win-mtime"` in
+  `daemon.json` so the reduced fidelity is visible.
+- `RUN_BUBBLE_INCLUDE_DESKTOP=1` shows the desktop app's own sessions in the bubble.
+
 ## [0.2.0] - 2026-10-18
 
 ### Added

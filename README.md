@@ -5,15 +5,18 @@
 <h1 align="center">dsh-run-bubble</h1>
 
 <p align="center">
-  <b>Always-on-top visibility for DeepSeek Harness sessions on macOS.</b><br>
-  A native AppKit bubble backed by a small Node daemon. See roots, child agents,<br>
-  tokens, models, and reasoning effort without switching windows.
+  <b>Always-on-top visibility for DeepSeek Harness sessions on macOS and Windows.</b><br>
+  A native AppKit bubble on macOS, a layered Win32 window on Windows, both backed<br>
+  by the same small Node daemon. See roots, child agents, tokens, models, and<br>
+  reasoning effort without switching windows.
 </p>
 
 <p align="center">
   <a href="https://github.com/Player-YN/dsh-run-bubble/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Player-YN/dsh-run-bubble/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
+  <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white">
   <img alt="Swift 5.9+" src="https://img.shields.io/badge/Swift-5.9%2B-F05138?logo=swift&logoColor=white">
+  <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-5FA04E?logo=nodedotjs&logoColor=white">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-2dd4bf">
@@ -102,13 +105,25 @@ It is useful when you:
 
 ### Requirements
 
+**macOS**
+
 - macOS 14 or newer
 - Xcode Command Line Tools (`swiftc`) — `xcode-select --install`
 - Node.js 20+
 - `zstd` — `brew install zstd`
 - A DeepSeek Harness installation that supports the `acp` profile (for sessions)
 
-### Install
+**Windows**
+
+- Windows 10 1809+ or Windows 11
+- [.NET 8 SDK](https://dotnet.microsoft.com/download) — builds the overlay and the lease probe
+- Node.js **22.15+** (native `zlib` zstd decompression; 24.x recommended)
+- A DeepSeek Harness installation that supports the `acp` profile (for sessions)
+
+No `zstd` CLI is required on Windows: the daemon decompresses the concatenated
+zstd frames with Node's built-in codec.
+
+### Install (macOS)
 
 ```sh
 git clone https://github.com/Player-YN/dsh-run-bubble.git
@@ -130,19 +145,66 @@ and starts both. No `sudo` is required.
 ./run-bubble uninstall
 ```
 
+### Install (Windows)
+
+```powershell
+git clone https://github.com/Player-YN/dsh-run-bubble.git
+cd dsh-run-bubble
+pwsh -File .\run-bubble.ps1 install -Rebuild
+pwsh -File .\run-bubble.ps1 status
+```
+
+`install` builds two binaries with `dotnet publish` — the layered-window overlay
+(`RunBubbleOverlay.exe`) and the kernel lease probe (`DshLeaseProbe.exe`) — copies
+everything to `%LOCALAPPDATA%\dsh-run-bubble\`, registers two per-user Scheduled
+Tasks (`DshRunBubble-Daemon`, `DshRunBubble-Overlay`, restart on failure) and
+starts them. No administrator rights are required.
+
+```powershell
+pwsh -File .\run-bubble.ps1 status      # PIDs, mode, lease probe, root/child/token counts
+pwsh -File .\run-bubble.ps1 doctor      # end-to-end self-check
+pwsh -File .\run-bubble.ps1 logs        # daemon + overlay log tails
+pwsh -File .\run-bubble.ps1 snapshot $env:TEMP\bubble.png
+pwsh -File .\run-bubble.ps1 restart
+pwsh -File .\run-bubble.ps1 uninstall   # keeps ~\.dsh\run-bubble\* untouched
+```
+
+<p align="center">
+  <img src="docs/images/windows/expanded.png" alt="Windows overlay, expanded" width="356">
+  <img src="docs/images/windows/pill.png" alt="Windows overlay, idle pill" width="238">
+  <br><sub><b>Windows.</b> A layered Win32 window with per-pixel alpha; the idle pill never hides.
+  More states (light theme included) live in <code>docs/images/windows/</code>.</sub>
+</p>
+
+### Which sessions are shown
+
+The bubble is for **externally driven** runs (`dsh --profile acp|headless|sdk`).
+Sessions owned by the desktop app are filtered out so you never see two bubbles
+for the same conversation.
+
+Windows resolves ownership exactly: DSH guards each session with a named kernel
+semaphore (`Local\dsh-session-lock-<sha256>`), so the daemon reads the real lease
+holder PID and compares it against the desktop host instead of guessing. Want the
+desktop app's own sessions in the bubble anyway? Set `RUN_BUBBLE_INCLUDE_DESKTOP=1`.
+
 ### Talk to DSH from another agent
 
 The optional `interop/dsh-chat` wrapper writes a small sidecar so the bubble can
-show an accurate source and title:
+show an accurate source and title.
 
 ```sh
+# macOS
 interop/install.sh
+dsh-chat ask --source codex --title "Auth refactor" "Refactor the auth middleware."
+
+# Windows
+pwsh -File .\interop\install.ps1
 dsh-chat ask --source codex --title "Auth refactor" "Refactor the auth middleware."
 ```
 
 `--source` accepts `codex`, `claude-code`, `cursor`, `terminal`, or a free-form
-label. Without it, the daemon infers the source from the lock holder's process
-tree and falls back to the first user prompt for the task preview.
+label. Without it, the daemon infers the source from the session lease holder's
+process tree and falls back to the first user prompt for the task preview.
 
 ## Usage
 
@@ -161,10 +223,11 @@ flowchart LR
   A["ACP clients<br/>Codex · Claude Code · scripts"] -->|ACP stdio| B["dsh --profile acp"]
   A -->|"dsh-chat --source/--title"| M["sidecar JSON"]
   B --> S["~/.dsh/sessions<br/>JSONL + zstd"]
-  S --> D["run-bubble daemon<br/>Node · launchd"]
+  S --> D["run-bubble daemon<br/>Node"]
   M --> D
-  D -->|"status.json v2"| O["RunBubbleOverlay<br/>AppKit NSPanel"]
-  L["launchd"] --- D
+  P["DshLeaseProbe.exe<br/>session lease holders"] --> D
+  D -->|"status.json v2"| O["RunBubbleOverlay<br/>AppKit NSPanel / layered Win32 window"]
+  L["launchd / Task Scheduler"] --- D
   L --- O
 ```
 
@@ -172,18 +235,23 @@ flowchart LR
    `session.v*.jsonl.zstd` logs.
 2. It folds each log once into a compact state: title, model, reasoning effort,
    turn boundaries, token usage, child descriptors, and last event time. It never
-   retains the event array.
-3. A session is active when its last `turn/start` has no later `turn/end`. A
-   killed process can leave a dangling turn, so the daemon also checks the
-   `session.lock` holder with `lsof` and hides sessions with no live holder.
-4. Sessions whose lock is held by the DSH desktop host are skipped, so the
+   retains the event array. Logs are concatenated zstd frames — one per append —
+   so the decoder walks frames instead of trusting a single-frame decompress.
+3. Liveness comes from the platform's **real session lease**, not a guess: macOS
+   reads the `session.lock` holder with `lsof`; Windows asks `DshLeaseProbe.exe`
+   for the holder of the named kernel semaphore DSH creates per session
+   (`Local\dsh-session-lock-<sha256>`). No holder means the run is gone. If the
+   probe cannot run, the daemon degrades to a `mtime`/sidecar heuristic and says
+   so in `daemon.json` (`"mode": "win-mtime"`).
+4. Sessions whose lease is held by the DSH desktop host are skipped, so the
    bubble is for terminal/agent-driven runs only.
 5. The result is written atomically to `~/.dsh/run-bubble/status.json`; the
-   AppKit panel polls it every 500 ms and redraws only when state changes.
+   overlay polls it every 500 ms and redraws only when state changes.
 6. The panel is always mounted. A short 2.5 s grace period prevents a child
    finishing or a single empty poll from flashing the bubble to idle.
 
-No DSH kernel changes, no patching, no instrumentation.
+No DSH kernel changes, no patching, no instrumentation. The lease probe is
+strictly read-only: it never acquires, waits on, or releases a session lease.
 
 ## Metadata contract
 
@@ -237,6 +305,8 @@ the UI.
 
 ## Paths
 
+**macOS**
+
 | Path | Purpose |
 |---|---|
 | `~/Library/Application Support/dsh-run-bubble/` | Installed `daemon.mjs` + `RunBubbleOverlay` |
@@ -247,36 +317,67 @@ the UI.
 | `~/.dsh/run-bubble/sessions/` | Optional sidecar metadata |
 | `~/.dsh/run-bubble/position.json` | Drag anchor + pin state |
 
+**Windows**
+
+| Path | Purpose |
+|---|---|
+| `%LOCALAPPDATA%\dsh-run-bubble\` | Installed `daemon.mjs`, `src\win\*`, `RunBubbleOverlay.exe`, `DshLeaseProbe.exe` |
+| `%LOCALAPPDATA%\dsh-run-bubble\logs\` | daemon/overlay stdout + stderr logs |
+| Scheduled Tasks `DshRunBubble-Daemon`, `DshRunBubble-Overlay` | Per-user logon tasks with restart-on-failure |
+| `%USERPROFILE%\.dsh\run-bubble\status.json` | Latest snapshot |
+| `%USERPROFILE%\.dsh\run-bubble\sessions\` | Optional sidecar metadata |
+| `%USERPROFILE%\.dsh\run-bubble\position.json` | Drag anchor + pin state |
+| `%USERPROFILE%\.dsh\run-bubble\daemon.json` | Daemon pid + diagnostic mode (`win-lease` / `win-mtime`) |
+
 ## Privacy & security
 
 - Everything is local. There is no HTTP listener, analytics, crash reporting, or
   outbound network call.
 - The daemon reads local session logs, optional local sidecars, and process
-  command names (`ps -o ppid=,comm=`). It does **not** read environment
-  variables or secrets.
-- Sidecars are created with mode `0600`; the status file is `0600`.
-- No Accessibility, Input Monitoring, or Screen Recording permission is needed.
+  metadata. It does **not** read environment variables or secrets.
+- On macOS it reads process command names via `ps -o ppid=,comm=`.
+- On Windows it reads the process table (via `Get-CimInstance Win32_Process`) and,
+  through `DshLeaseProbe.exe`, the kernel handle table — **only** to resolve which
+  PID holds a session lease. The probe duplicates handles read-only, asks NtQueryObject
+  for the object *name*, and never reads file contents, memory, or credentials.
+- Sidecars are created with mode `0600` (POSIX) or under the user's profile ACL
+  (Windows); the status file is likewise private to the user.
+- No Accessibility, Input Monitoring, or Screen Recording permission is needed on
+  macOS, and no elevation is needed on Windows.
 
 See [SECURITY.md](SECURITY.md) for the vulnerability-reporting flow.
 
 ## Limitations
 
-- **macOS only.** The daemon is portable Node, but the overlay is AppKit.
+- **Two overlays, one shared engine.** macOS uses Swift/AppKit (`overlay.swift`);
+  Windows uses C#/.NET 8 with a layered Win32 window (`src/overlay/`). The daemon
+  and the `status.json` contract are shared.
 - **External sessions only.** Desktop-app chat sessions are filtered to avoid a
-  duplicate bubble.
+  duplicate bubble. On Windows you can opt in with `RUN_BUBBLE_INCLUDE_DESKTOP=1`.
+- **Windows liveness needs the probe.** Lease detection depends on
+  `DshLeaseProbe.exe`; without it the daemon falls back to a `mtime`/sidecar
+  heuristic (`mode: "win-mtime"`) that can briefly misjudge a silent session.
+  Sessions launched outside `interop/dsh-chat` carry no sidecar, so an external
+  `dsh --profile acp` run started by a third-party tool may show as `Unknown`
+  until the probe resolves its holder.
+- **No Windows virtual-desktop pinning.** macOS pins the panel to every Space
+  (`canJoinAllSpaces`); on Windows it is topmost but lives on one virtual desktop.
 - **Source inference is a heuristic.** Use `dsh-chat --source` for an exact
   label; inferred sources show `~`.
-- **Titles are not LLM-summarized.** The title is the explicit sidecar title or
-  the first real user prompt.
+- **Titles are not LLM-summarized.** The title is the explicit sidecar title, the
+  DSH title event, or the first real user prompt.
 - **Collapse state is per-process.** Pin and drag position persist; per-root
   collapse state resets on restart.
 - **Memory scales with active log size.** The daemon decodes compressed logs on
   change; measured ~105 MB total idle and ~150–175 MB with 6–8 concurrent large
-  sessions. The overlay itself stays around 47 MB.
+  sessions. The overlay itself stays around 47 MB on macOS and 60–90 MB on
+  Windows.
 - **UI copy is Chinese-first.** The structure is icon- and chip-led; English
   localization is welcome.
 
 ## Development
+
+**macOS**
 
 ```sh
 make check      # node --check + Swift typecheck
@@ -285,31 +386,57 @@ make install    # install/restart LaunchAgents
 make snapshot   # render the current status to /tmp/dsh-run-bubble.png
 ```
 
+**Windows**
+
+```powershell
+pwsh -File .\build.ps1            # dotnet publish overlay + lease probe into dist\
+pwsh -File .\build.ps1 -Clean     # remove dist\ first
+pwsh -File .\run-bubble.ps1 install -Rebuild
+node tests\smoke.mjs              # daemon contract test on a synthetic store
+```
+
 Demo modes never read the real session store:
 
 ```sh
+# macOS
 ./RunBubbleOverlay --demo --snapshot /tmp/expanded.png
 ./RunBubbleOverlay --demo-many --snapshot /tmp/many.png
 ./RunBubbleOverlay --demo-many --collapse-first --snapshot /tmp/collapse.png
 ./RunBubbleOverlay --demo-idle --snapshot /tmp/idle.png
 ./RunBubbleOverlay --collapsed --demo-idle --snapshot /tmp/pill.png
+
+# Windows
+.\dist\RunBubbleOverlay.exe --demo --snapshot $env:TEMP\expanded.png
+.\dist\RunBubbleOverlay.exe --demo-many --snapshot $env:TEMP\many.png
+.\dist\RunBubbleOverlay.exe --demo-many --collapse-first --snapshot $env:TEMP\collapse.png
+.\dist\RunBubbleOverlay.exe --demo-idle --snapshot $env:TEMP\idle.png
+.\dist\RunBubbleOverlay.exe --demo-idle --collapsed --snapshot $env:TEMP\pill.png
 ```
 
 Project layout:
 
 ```text
 .
-├── daemon.mjs              # status engine (Node, no deps)
-├── overlay.swift           # AppKit NSPanel + custom NSView
-├── run-bubble              # build/install/start/stop/snapshot
-├── interop/                # optional ACP wrapper + sidecar
-├── docs/                   # banner, screenshots, images
+├── daemon.mjs                  # status engine (Node, no deps, macOS + Windows)
+├── src/win/                    # Windows-only daemon modules: process table,
+│                               #   multi-frame zstd, lease liveness
+├── overlay.swift               # macOS: AppKit NSPanel + custom NSView
+├── src/overlay/                # Windows: layered Win32 window (C#/.NET 8)
+├── src/lease-probe/            # Windows: read-only kernel lease probe (C#)
+├── run-bubble                  # macOS: build/install/start/stop/snapshot
+├── run-bubble.ps1              # Windows: same CLI surface
+├── build.ps1                   # Windows: dotnet publish pipeline
+├── tests/                      # daemon smoke test + synthetic session store
+├── interop/                    # optional ACP wrapper + sidecar
+├── docs/                       # banner, screenshots, design notes
 ├── Makefile
 └── .github/workflows/ci.yml
 ```
 
-CI runs on `macos-14`, checks both JavaScript files, and compiles the Swift
-overlay.
+CI runs on both `macos-14` (Swift overlay + shared JS) and `windows-latest`
+(overlay, lease probe, daemon smoke test, and the demo snapshots). Design notes
+for the Windows port live in [docs/PORT-WINDOWS.md](docs/PORT-WINDOWS.md) and
+[docs/dsh-internals-windows.md](docs/dsh-internals-windows.md).
 
 ## Contributing
 
@@ -330,4 +457,6 @@ If this saves you a tab switch, a star helps other agent-tooling people find it.
 - [Agent Client Protocol](https://agentclientprotocol.com/) for the stdio
   interface used by `interop/dsh-chat`.
 - Apple AppKit and launchd for making a 47 MB native overlay possible.
+- .NET 8 / WinForms and the Win32 layered-window API for the Windows overlay and
+  the read-only kernel lease probe.
 - [zstd](https://github.com/facebook/zstd) for the session log format.

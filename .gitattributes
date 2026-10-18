@@ -1,0 +1,23 @@
+# Normalise line endings in the repository; checkouts follow the platform.
+* text=auto eol=lf
+
+# Scripts and sources: LF is correct for both pwsh 7 and Windows PowerShell 5.1,
+# and it matches what the macOS sources already use.
+*.ps1   text eol=lf
+*.psm1  text eol=lf
+*.cmd   text eol=lf
+*.bat   text eol=lf
+*.cs    text eol=lf
+*.csproj text eol=lf
+*.swift text eol=lf
+*.sh    text eol=lf
+*.mjs   text eol=lf
+*.yml   text eol=lf
+
+# Binary assets
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pdb binary
+*.zstd binary

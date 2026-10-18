@@ -1,10 +1,34 @@
+# --- macOS ---
 .DS_Store
 RunBubbleOverlay
+swiftc
+
+# --- Windows / .NET ---
+dist/
+bin/
+obj/
+*.exe
+*.pdb
+*.dll
+*.user
+.vs/
+.vsconfig
+TestResults/
+*.binlog
+
+# --- runtime state (never commit) ---
 *.log
 *.tmp
-*.swp
 position.json
 status.json
+daemon.json
+*.zstd
+logs/
+
+# --- misc ---
 node_modules/
 __pycache__/
 .build/
+*.swp
+Thumbs.db
+desktop.ini

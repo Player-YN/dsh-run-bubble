@@ -5,15 +5,17 @@
 <h1 align="center">dsh-run-bubble</h1>
 
 <p align="center">
-  <b>macOS 上常驻显示 DeepSeek Harness 外部会话状态的桌面气泡。</b><br>
-  Node daemon + 原生 AppKit 面板，不打断当前窗口就能看到主 Session、子 Agent、<br>
-  token、模型和推理强度。
+  <b>macOS 与 Windows 上常驻显示 DeepSeek Harness 会话状态的桌面气泡。</b><br>
+  macOS 用原生 AppKit 面板，Windows 用分层 Win32 窗口，共用同一个轻量 Node daemon。<br>
+  不打断当前窗口就能看到主 Session、子 Agent、token、模型和推理强度。
 </p>
 
 <p align="center">
   <a href="https://github.com/Player-YN/dsh-run-bubble/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Player-YN/dsh-run-bubble/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
+  <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white">
   <img alt="Swift 5.9+" src="https://img.shields.io/badge/Swift-5.9%2B-F05138?logo=swift&logoColor=white">
+  <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-5FA04E?logo=nodedotjs&logoColor=white">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 </p>
@@ -103,13 +105,24 @@
 
 ### 要求
 
+**macOS**
+
 - macOS 14+
 - Xcode Command Line Tools（`swiftc`）：`xcode-select --install`
 - Node.js 20+
 - `zstd`：`brew install zstd`
 - 可运行 `acp` profile 的 DeepSeek Harness（用于产生会话）
 
-### 安装
+**Windows**
+
+- Windows 10 1809+ 或 Windows 11
+- [.NET 8 SDK](https://dotnet.microsoft.com/download)（编译 overlay 与租约探针）
+- Node.js **22.15+**（需要内置 `zlib` 的 zstd 解压，推荐 24.x）
+- 可运行 `acp` profile 的 DeepSeek Harness（用于产生会话）
+
+Windows 上**不需要** `zstd` 命令行：daemon 用 Node 内置解码器直接处理拼接的多帧 zstd。
+
+### 安装（macOS）
 
 ```sh
 git clone https://github.com/Player-YN/dsh-run-bubble.git
@@ -131,17 +144,61 @@ cd dsh-run-bubble
 ./run-bubble uninstall
 ```
 
+### 安装（Windows）
+
+```powershell
+git clone https://github.com/Player-YN/dsh-run-bubble.git
+cd dsh-run-bubble
+pwsh -File .\run-bubble.ps1 install -Rebuild
+pwsh -File .\run-bubble.ps1 status
+```
+
+`install` 会用 `dotnet publish` 构建两个程序——分层窗口 overlay
+（`RunBubbleOverlay.exe`）和内核租约探针（`DshLeaseProbe.exe`）——复制到
+`%LOCALAPPDATA%\dsh-run-bubble\`，注册两个用户级计划任务（`DshRunBubble-Daemon`、
+`DshRunBubble-Overlay`，失败自动重启）并启动。**不需要管理员权限。**
+
+```powershell
+pwsh -File .\run-bubble.ps1 status      # PID、判定模式、探针状态、root/子 Agent/token
+pwsh -File .\run-bubble.ps1 doctor      # 端到端自检
+pwsh -File .\run-bubble.ps1 logs        # daemon + overlay 日志尾部
+pwsh -File .\run-bubble.ps1 snapshot $env:TEMP\bubble.png
+pwsh -File .\run-bubble.ps1 restart
+pwsh -File .\run-bubble.ps1 uninstall   # 保留 ~\.dsh\run-bubble\* 不动
+```
+
+<p align="center">
+  <img src="docs/images/windows/expanded.png" alt="Windows 展开态" width="356">
+  <img src="docs/images/windows/pill.png" alt="Windows 空闲胶囊" width="238">
+  <br><sub><b>Windows。</b>分层 Win32 窗口 + 逐像素 alpha；空闲胶囊常驻不隐藏。
+  更多状态（含浅色主题）见 <code>docs/images/windows/</code>。</sub>
+</p>
+
+### 显示哪些会话
+
+气泡只显示**外部驱动**的会话（`dsh --profile acp|headless|sdk`）。桌面端自己的聊天会话
+会被过滤，避免同一个对话出现两个气泡。
+
+Windows 上的归属是**精确**判定的：DSH 为每个会话持有一个命名内核信号量
+（`Local\dsh-session-lock-<sha256>`），daemon 直接读出真实持有者 PID 再与桌面宿主比对，
+而不是靠猜。就想在气泡里看到桌面端的会话？设 `RUN_BUBBLE_INCLUDE_DESKTOP=1`。
+
 ### 从其他 Agent 调用 DSH
 
-可选的 `interop/dsh-chat` 会写 sidecar，让气泡显示准确的来源和标题：
+可选的 `interop/dsh-chat` 会写 sidecar，让气泡显示准确的来源和标题。
 
 ```sh
+# macOS
 interop/install.sh
+dsh-chat ask --source codex --title "Auth refactor" "Refactor the auth middleware."
+
+# Windows
+pwsh -File .\interop\install.ps1
 dsh-chat ask --source codex --title "Auth refactor" "Refactor the auth middleware."
 ```
 
 `--source` 可填 `codex`、`claude-code`、`cursor`、`terminal` 或自定义标签。
-不填时，daemon 会根据 lock holder 的进程树推断来源，并用首条用户消息作为任务预览。
+不填时，daemon 会根据会话租约持有者的父进程链推断来源，并用首条用户消息作为任务预览。
 
 ## 使用方式
 
@@ -159,25 +216,30 @@ flowchart LR
   A["ACP 客户端<br/>Codex · Claude Code · 脚本"] -->|ACP stdio| B["dsh --profile acp"]
   A -->|"dsh-chat --source/--title"| M["sidecar JSON"]
   B --> S["~/.dsh/sessions<br/>JSONL + zstd"]
-  S --> D["run-bubble daemon<br/>Node · launchd"]
+  S --> D["run-bubble daemon<br/>Node"]
   M --> D
-  D -->|"status.json v2"| O["RunBubbleOverlay<br/>AppKit NSPanel"]
-  L["launchd"] --- D
+  P["DshLeaseProbe.exe<br/>会话租约持有者"] --> D
+  D -->|"status.json v2"| O["RunBubbleOverlay<br/>AppKit NSPanel / 分层 Win32 窗口"]
+  L["launchd / 计划任务"] --- D
   L --- O
 ```
 
 1. daemon 扫描 `~/.dsh/sessions`（或 `$DSH_HOME/sessions`）下的
    `session.v*.jsonl.zstd`。
 2. 一次折叠每条日志：标题、模型、推理强度、turn 边界、token、子 Agent 描述和最后事件
-   时间；不保留事件数组。
-3. 最后一个 `turn/start` 之后没有 `turn/end` 即视为运行中；进程被杀死可能留下悬空
-   turn，所以还会用 `lsof` 检查 `session.lock` holder。
-4. 如果 session 的锁由 DSH 桌面端持有，则跳过，避免和桌面端重复。
-5. 结果原子写入 `~/.dsh/run-bubble/status.json`；AppKit 面板每 500ms 轮询一次，状态
+   时间；不保留事件数组。日志是**每追加一次就写一帧**的多帧 zstd，解帧器逐帧走，
+   不能只解第一帧。
+3. 活跃性来自**真实会话租约**而不是猜测：macOS 用 `lsof` 读 `session.lock` 持有者；
+   Windows 让 `DshLeaseProbe.exe` 读 DSH 为每个会话创建的内核信号量
+   （`Local\dsh-session-lock-<sha256>`）的持有者。没人持有 = 进程已死。探针不可用时
+   降级为 `mtime`/sidecar 启发式，并在 `daemon.json` 标记 `"mode": "win-mtime"`。
+4. 如果会话租约由 DSH 桌面端持有，则跳过，避免和桌面端重复。
+5. 结果原子写入 `~/.dsh/run-bubble/status.json`；overlay 每 500ms 轮询一次，状态
    变化才重绘。
 6. 面板始终挂载；子 Agent 结束或单次空轮询时保留 2.5 秒 last-non-empty，避免闪烁。
 
-没有 DSH 内核改动，没有补丁，没有注入。
+没有 DSH 内核改动，没有补丁，没有注入。租约探针严格只读：从不获取、等待或释放任何
+会话租约。
 
 ## 元数据契约
 
@@ -230,6 +292,8 @@ flowchart LR
 
 ## 路径
 
+**macOS**
+
 | 路径 | 用途 |
 |---|---|
 | `~/Library/Application Support/dsh-run-bubble/` | 安装后的 `daemon.mjs` + `RunBubbleOverlay` |
@@ -240,28 +304,54 @@ flowchart LR
 | `~/.dsh/run-bubble/sessions/` | 可选 sidecar |
 | `~/.dsh/run-bubble/position.json` | 拖动锚点 + 钉子状态 |
 
+**Windows**
+
+| 路径 | 用途 |
+|---|---|
+| `%LOCALAPPDATA%\dsh-run-bubble\` | 安装后的 `daemon.mjs`、`src\win\*`、`RunBubbleOverlay.exe`、`DshLeaseProbe.exe` |
+| `%LOCALAPPDATA%\dsh-run-bubble\logs\` | daemon/overlay 的 stdout + stderr 日志 |
+| 计划任务 `DshRunBubble-Daemon`、`DshRunBubble-Overlay` | 用户登录触发、失败自动重启 |
+| `%USERPROFILE%\.dsh\run-bubble\status.json` | 最新状态快照 |
+| `%USERPROFILE%\.dsh\run-bubble\sessions\` | 可选 sidecar |
+| `%USERPROFILE%\.dsh\run-bubble\position.json` | 拖动锚点 + 钉子状态 |
+| `%USERPROFILE%\.dsh\run-bubble\daemon.json` | daemon pid + 判定模式（`win-lease` / `win-mtime`） |
+
 ## 隐私与安全
 
 - 纯本地：没有 HTTP 监听、遥测、崩溃上报或外发请求。
-- daemon 只读本地会话日志、可选 sidecar 和进程命令名（`ps -o ppid=,comm=`）；
-  不读取环境变量或密钥。
-- sidecar 和 status 文件权限为 `0600`。
-- 不需要辅助功能、输入监控或录屏权限。
+- daemon 只读本地会话日志、可选 sidecar 和进程元数据；**不读取环境变量或密钥**。
+- macOS 上用 `ps -o ppid=,comm=` 读进程命令行。
+- Windows 上读进程表（`Get-CimInstance Win32_Process`），并通过 `DshLeaseProbe.exe`
+  读内核句柄表——**仅**用于确定哪个 PID 持有会话租约。探针只做只读的句柄复制，向
+  NtQueryObject 询问对象**名字**，不读文件内容、不读内存、不碰凭据。
+- sidecar 权限在 POSIX 下为 `0600`，Windows 下依赖用户目录 ACL；status 文件同样只对
+  本人可读。
+- macOS 不需要辅助功能/输入监控/录屏权限；Windows 不需要管理员权限。
 
 安全问题请走仓库 Security 页的 **Report a vulnerability**，不要公开贴真实 prompt 或日志。
 
 ## 限制
 
-- **仅 macOS。** daemon 是可移植的 Node，但 overlay 是 AppKit。
-- **仅外部会话。** 桌面端聊天会话会被过滤，避免重复。
+- **两套 overlay，一个引擎。** macOS 用 Swift/AppKit（`overlay.swift`）；Windows 用
+  C#/.NET 8 + 分层 Win32 窗口（`src/overlay/`）。daemon 与 `status.json` 契约共用。
+- **仅外部会话。** 桌面端聊天会话会被过滤，避免重复。Windows 上可用
+  `RUN_BUBBLE_INCLUDE_DESKTOP=1` 显式包含。
+- **Windows 活跃性依赖探针。** 租约探测需要 `DshLeaseProbe.exe`；缺失时降级为
+  `mtime`/sidecar 启发式（`mode: "win-mtime"`），对长时间静默的会话可能短暂误判。
+  不经 `interop/dsh-chat` 启动的外部 `dsh --profile acp` 没有 sidecar，来源在探针
+  解析出持有者之前会显示为 `Unknown`。
+- **Windows 无虚拟桌面固定。** macOS 可钉在所有 Space（`canJoinAllSpaces`）；Windows
+  只保证置顶，面板位于当前虚拟桌面。
 - **来源推断是启发式。** 需要精确来源时用 `dsh-chat --source`；推断值显示 `~`。
-- **标题不做 LLM 摘要。** 标题来自显式 sidecar 或首条真实用户消息。
+- **标题不做 LLM 摘要。** 标题来自显式 sidecar、DSH 的 title 事件或首条真实用户消息。
 - **折叠状态不持久化。** 钉子和拖动位置持久化，root 折叠状态重启后恢复展开。
 - **内存随活跃日志大小增长。** 实测空闲约 105MB，6–8 个并发大日志时约
-  150–175MB；overlay 本身约 47MB。
+  150–175MB；overlay 本身 macOS 约 47MB、Windows 约 60–90MB。
 - **UI 文案以中文为主。** 结构和图标可读，欢迎补英文文案。
 
 ## 开发
+
+**macOS**
 
 ```sh
 make check      # node --check + Swift typecheck
@@ -270,30 +360,56 @@ make install    # 安装/重启 LaunchAgents
 make snapshot   # 渲染当前状态到 /tmp/dsh-run-bubble.png
 ```
 
+**Windows**
+
+```powershell
+pwsh -File .\build.ps1            # dotnet publish overlay + 租约探针到 dist\
+pwsh -File .\build.ps1 -Clean     # 先清 dist\
+pwsh -File .\run-bubble.ps1 install -Rebuild
+node tests\smoke.mjs              # 用合成会话库验证 daemon 契约
+```
+
 Demo 模式不会读取真实 session store：
 
 ```sh
+# macOS
 ./RunBubbleOverlay --demo --snapshot /tmp/expanded.png
 ./RunBubbleOverlay --demo-many --snapshot /tmp/many.png
 ./RunBubbleOverlay --demo-many --collapse-first --snapshot /tmp/collapse.png
 ./RunBubbleOverlay --demo-idle --snapshot /tmp/idle.png
 ./RunBubbleOverlay --collapsed --demo-idle --snapshot /tmp/pill.png
+
+# Windows
+.\dist\RunBubbleOverlay.exe --demo --snapshot $env:TEMP\expanded.png
+.\dist\RunBubbleOverlay.exe --demo-many --snapshot $env:TEMP\many.png
+.\dist\RunBubbleOverlay.exe --demo-many --collapse-first --snapshot $env:TEMP\collapse.png
+.\dist\RunBubbleOverlay.exe --demo-idle --snapshot $env:TEMP\idle.png
+.\dist\RunBubbleOverlay.exe --demo-idle --collapsed --snapshot $env:TEMP\pill.png
 ```
 
 目录结构：
 
 ```text
 .
-├── daemon.mjs              # 状态引擎（Node，无依赖）
-├── overlay.swift           # AppKit NSPanel + 自绘 NSView
-├── run-bubble              # build/install/start/stop/snapshot
-├── interop/                # 可选 ACP wrapper + sidecar
-├── docs/                   # banner、截图、图片
+├── daemon.mjs                  # 状态引擎（Node，无依赖，双平台）
+├── src/win/                    # Windows 专用模块：进程表、多帧 zstd、租约判定
+├── overlay.swift               # macOS：AppKit NSPanel + 自绘 NSView
+├── src/overlay/                # Windows：分层 Win32 窗口（C#/.NET 8）
+├── src/lease-probe/            # Windows：只读内核租约探针（C#）
+├── run-bubble                  # macOS：build/install/start/stop/snapshot
+├── run-bubble.ps1              # Windows：同样的子命令
+├── build.ps1                   # Windows：dotnet publish 流程
+├── tests/                      # daemon 冒烟测试 + 合成会话库
+├── interop/                    # 可选 ACP wrapper + sidecar
+├── docs/                       # banner、截图、设计笔记
 ├── Makefile
 └── .github/workflows/ci.yml
 ```
 
-CI 在 `macos-14` 上检查两个 JS 文件并编译 Swift overlay。
+CI 同时跑 `macos-14`（Swift overlay + 共用 JS）和 `windows-latest`（overlay、租约探针、
+daemon 冒烟测试、全部 demo 截图）。Windows 移植的设计笔记见
+[docs/PORT-WINDOWS.md](docs/PORT-WINDOWS.md) 与
+[docs/dsh-internals-windows.md](docs/dsh-internals-windows.md)。
 
 ## 贡献
 
@@ -313,4 +429,5 @@ CI 在 `macos-14` 上检查两个 JS 文件并编译 Swift overlay。
 - [Agent Client Protocol](https://agentclientprotocol.com/)：`interop/dsh-chat`
   使用的 stdio 协议。
 - Apple AppKit 和 launchd：让 47MB 原生 overlay 成为可能。
+- .NET 8 / WinForms 与 Win32 分层窗口 API：Windows overlay 与只读内核租约探针。
 - [zstd](https://github.com/facebook/zstd)：会话日志压缩格式。

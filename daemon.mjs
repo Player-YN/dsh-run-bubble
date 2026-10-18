@@ -6,38 +6,117 @@
  * shared session store, folds externally driven sessions into a small JSON
  * document, and writes it atomically for the native overlay.
  *
- * No npm dependencies: Node built-ins plus the `zstd` CLI (Homebrew or
- * /usr/bin/zstd). The DSH sessions are append-only JSONL frames compressed
- * with zstd; the daemon decodes a log only when its size/mtime changes.
+ * Cross-platform since the Windows port:
+ *   - decode: darwin uses the `zstd` CLI; win32 uses `node:zlib` with a manual
+ *     concatenated-frame walk (see src/win/zstd.mjs),
+ *   - liveness: darwin uses `session.lock` + `lsof`; win32 uses DSH's named
+ *     kernel write leases (`DshLeaseProbe.exe`, see src/win/liveness.mjs) and
+ *     only falls back to sidecar/mtime heuristics when the probe is unavailable.
+ *     `RUN_BUBBLE_INCLUDE_AMBIGUOUS` (default on) applies to the fallback path.
+ *   - process table: darwin shells out to `ps`; win32 uses one cached CIM query
+ *     (src/win/process-table.mjs).
+ *
+ * No npm dependencies, no network requests.
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
+import {
+  canonicalSource,
+  defaultSourceLabel,
+  desktopHostPids,
+  getProcessTable,
+  inferSource as inferSourceFromTable,
+  parentChain,
+  sourceFromCommand
+} from './src/win/process-table.mjs'
+import {
+  DEFAULT_LIVE_MS,
+  DEFAULT_STALE_MS,
+  externalCliPids,
+  isZombie,
+  judgmentMode,
+  leaseHash,
+  openTurnFromState,
+  scanLeases,
+  sidecarPid,
+  sidecarSource,
+  windowsLive,
+  windowsOwnership
+} from './src/win/liveness.mjs'
+import { readZstdText } from './src/win/zstd.mjs'
+
 const execFileAsync = promisify(execFile)
-const HOME = process.env.HOME || homedir()
+const PLATFORM = process.platform
+const IS_WIN = PLATFORM === 'win32'
+
+// `HOME` is usually empty on Windows; the profile directory is the source of
+// truth there. On macOS keep the historical $HOME precedence.
+const HOME = IS_WIN ? homedir() : (process.env.HOME || homedir())
 const DSH_HOME = process.env.DSH_HOME || join(HOME, '.dsh')
 const SESSION_ROOT = join(DSH_HOME, 'sessions')
 const STATUS_DIR = process.env.RUN_BUBBLE_STATUS_DIR || join(DSH_HOME, 'run-bubble')
 const STATUS_FILE = join(STATUS_DIR, 'status.json')
 const STATE_FILE = join(STATUS_DIR, 'daemon.json')
-const LOG_DIR = join(HOME, 'Library', 'Logs', 'dsh-run-bubble')
+const SIDECAR_DIR = join(DSH_HOME, 'run-bubble', 'sessions')
+const LOG_DIR = process.env.RUN_BUBBLE_LOG_DIR || (IS_WIN
+  ? join(process.env.LOCALAPPDATA || join(HOME, 'AppData', 'Local'), 'dsh-run-bubble', 'logs')
+  : join(HOME, 'Library', 'Logs', 'dsh-run-bubble'))
 const LOG_FILE = join(LOG_DIR, 'daemon.log')
 const TICK_MS = 1500
 const RECENT_WINDOW_MS = 6 * 60 * 60 * 1000
-const SIDECAR_DIR = join(DSH_HOME, 'run-bubble', 'sessions')
 const SOURCE_INFER_TTL_MS = 5000
 const TASK_PREVIEW_LIMIT = 120
+const MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
+const MAX_DECOMPRESSED_BYTES = 100 * 1024 * 1024
+const TIMING = process.env.RUN_BUBBLE_TIMING === '1'
+const CACHE_LIMIT = 64
 
-const ZSTD = [
-  process.env.DSH_ZSTD,
-  '/opt/homebrew/bin/zstd',
-  '/usr/local/bin/zstd',
-  '/usr/bin/zstd'
-].find((candidate) => candidate && existsSync(candidate)) || 'zstd'
+function envMs(name, fallback) {
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+/** Boolean env flag; 0/false/no/off disable, anything else enables. */
+function envFlag(name, fallback) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === null || raw.trim() === '') return fallback
+  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase())
+}
+
+/** Like envFlag but undefined/empty stays null (tri-state for diagnostics). */
+function envFlagOptional(name) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === null || raw.trim() === '') return null
+  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase())
+}
+
+const LIVE_MS = envMs('RUN_BUBBLE_LIVE_MS', DEFAULT_LIVE_MS)
+const STALE_MS = envMs('RUN_BUBBLE_STALE_MS', DEFAULT_STALE_MS)
+// Show the desktop app's own sessions too (lease mode only). Off by default,
+// matching macOS behaviour.
+const INCLUDE_DESKTOP = envFlag('RUN_BUBBLE_INCLUDE_DESKTOP', false)
+// Force the T4 mtime/sidecar fallback even if a probe is present (tests/CI).
+const DISABLE_LEASE_PROBE = envFlag('RUN_BUBBLE_DISABLE_LEASE_PROBE', false)
+// Tri-state: only the *fallback* path consults it. In fallback mode ambiguous
+// sessions are included by default (Windows has no other evidence); in lease
+// mode the holder PID is precise and this flag is irrelevant. darwin's lock
+// holders decide, so it never reaches the ambiguous branch there.
+const INCLUDE_AMBIGUOUS_ENV = envFlagOptional('RUN_BUBBLE_INCLUDE_AMBIGUOUS')
+
+// darwin: external CLI; win32: in-process node:zlib decoder.
+const ZSTD = IS_WIN
+  ? 'node:zlib'
+  : ([
+      process.env.DSH_ZSTD,
+      '/opt/homebrew/bin/zstd',
+      '/usr/local/bin/zstd',
+      '/usr/bin/zstd'
+    ].find((candidate) => candidate && existsSync(candidate)) || 'zstd')
 
 const emptyTokens = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 })
 
@@ -46,6 +125,20 @@ function log(line) {
     mkdirSync(LOG_DIR, { recursive: true })
     appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`)
   } catch {}
+}
+
+const throttleAt = new Map()
+/** Log a repeated failure at most once per `intervalMs` per key. */
+function logThrottled(key, line, intervalMs = 60_000) {
+  const now = Date.now()
+  const last = throttleAt.get(key) || 0
+  if (now - last < intervalMs) return
+  throttleAt.set(key, now)
+  if (throttleAt.size > 256) {
+    const ordered = [...throttleAt.entries()].sort((a, b) => a[1] - b[1])
+    for (const [id] of ordered.slice(0, throttleAt.size - 256)) throttleAt.delete(id)
+  }
+  log(line)
 }
 
 function addTokens(target, usage) {
@@ -76,10 +169,22 @@ function sumTokens(items) {
   return out
 }
 
+/** `session-<uuid>` and bare `<uuid>` are both valid session ids. */
+function normalizeSessionId(value) {
+  const id = String(value ?? '')
+  return id.startsWith('session-') ? id.slice('session-'.length) : id
+}
+
+function shortIdFor(value) {
+  return normalizeSessionId(value).slice(0, 8)
+}
+
+/** Last path segment of the cwd, tolerant of Windows separators and drive roots. */
 function fallbackTitle(header, shortId) {
-  const cwd = typeof header?.cwd === 'string' ? header.cwd.replace(/\/+$/, '') : ''
-  const base = cwd.split('/').filter(Boolean).pop()
-  return base || `Session ${shortId}`
+  const cwd = typeof header?.cwd === 'string' ? header.cwd.replace(/[\\/]+$/, '') : ''
+  const base = cwd.split(/[\\/]+/).filter(Boolean).pop() || ''
+  if (!base || /^[a-z]:$/i.test(base)) return `Session ${shortId}`
+  return base
 }
 
 function collapseWhitespace(value) {
@@ -103,6 +208,38 @@ function userMessageText(data) {
   return parts.join('\n')
 }
 
+const PROMPT_PREFIXES = ['Current runtime context', '<system-reminder>']
+
+function isInjectablePrompt(text) {
+  return PROMPT_PREFIXES.some((prefix) => text.startsWith(prefix))
+}
+
+/**
+ * The first real user prompt, used for taskPreview (and as a last-resort title).
+ * This build of DSH delivers prompts through `agent/inbox/spliced`, older ones
+ * through `user/message`; both are folded here.
+ */
+function collectFirstPrompt(state, data, { spliced = false } = {}) {
+  if (state.firstPrompt) return
+  if (spliced) {
+    const inserted = Array.isArray(data?.inserted) ? data.inserted : []
+    for (const item of inserted) {
+      if (!item || item.role !== 'user') continue
+      const kind = item.source && typeof item.source === 'object' ? item.source.kind : undefined
+      // Approval prompts and other injected user-role items are not tasks.
+      if (typeof kind === 'string' && kind && kind !== 'user') continue
+      const text = collapseWhitespace(userMessageText(item))
+      if (!text || isInjectablePrompt(text)) continue
+      state.firstPrompt = text.slice(0, TASK_PREVIEW_LIMIT)
+      return
+    }
+    return
+  }
+  const text = collapseWhitespace(userMessageText(data))
+  if (!text || isInjectablePrompt(text)) return
+  state.firstPrompt = text.slice(0, TASK_PREVIEW_LIMIT)
+}
+
 /** Locate the newest canonical log in one session directory. */
 function newestLog(dir) {
   let best = null
@@ -121,36 +258,67 @@ function newestLog(dir) {
 /** Enumerate the shared session store without relying on DSH packages. */
 function listLogs() {
   const out = []
+  let projects
   try {
-    for (const project of readdirSync(SESSION_ROOT, { withFileTypes: true })) {
-      if (!project.isDirectory()) continue
-      const projectDir = join(SESSION_ROOT, project.name)
-      for (const session of readdirSync(projectDir, { withFileTypes: true })) {
-        if (!session.isDirectory()) continue
-        const dir = join(projectDir, session.name)
-        const logPath = newestLog(dir)
-        if (logPath) out.push({ id: session.name, dir, logPath })
-      }
+    projects = readdirSync(SESSION_ROOT, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const project of projects) {
+    if (!project.isDirectory()) continue
+    const projectDir = join(SESSION_ROOT, project.name)
+    let sessions
+    try {
+      sessions = readdirSync(projectDir, { withFileTypes: true })
+    } catch {
+      continue
     }
-  } catch {}
+    for (const session of sessions) {
+      if (!session.isDirectory()) continue
+      const dir = join(projectDir, session.name)
+      try {
+        const logPath = newestLog(dir)
+        if (logPath) out.push({ id: session.name, project: project.name, dir, logPath })
+      } catch {}
+    }
+  }
   return out
 }
 
-/** Decode one JSONL (optionally zstd) log into header + events. */
-async function readLog(entry) {
-  const stat = statSync(entry.logPath)
+/**
+ * Decode one JSONL (optionally zstd) log into header + folded state.
+ * Returns null when the bytes cannot be decoded; the caller keeps the previous
+ * cache entry (the file is append-only, so the cached subset stays valid).
+ */
+async function readLog(entry, stat) {
   const key = `${stat.size}:${stat.mtimeMs}`
   const cached = cache.get(entry.id)
   if (cached && cached.key === key) return cached
 
   let text
   if (entry.logPath.endsWith('.zstd')) {
-    const { stdout } = await execFileAsync(ZSTD, ['-d', '-c', entry.logPath], {
-      maxBuffer: 128 * 1024 * 1024,
-      timeout: 15000
-    })
-    text = stdout
+    if (IS_WIN) {
+      if (stat.size > MAX_COMPRESSED_BYTES) {
+        logThrottled(`large:${entry.id}`, `skip ${entry.id}: compressed log is ${stat.size} bytes`)
+        return null
+      }
+      text = readZstdText(entry.logPath, {
+        maxOutputBytes: MAX_DECOMPRESSED_BYTES,
+        onError: (message) => logThrottled(`zstd:${entry.id}`, `read ${entry.id}: ${message}`)
+      })
+      if (text === null) return null
+    } else {
+      const { stdout } = await execFileAsync(ZSTD, ['-d', '-c', entry.logPath], {
+        maxBuffer: 128 * 1024 * 1024,
+        timeout: 15000
+      })
+      text = stdout
+    }
   } else {
+    if (stat.size > MAX_DECOMPRESSED_BYTES) {
+      logThrottled(`large:${entry.id}`, `skip ${entry.id}: log is ${stat.size} bytes`)
+      return null
+    }
     text = readFileSync(entry.logPath, 'utf8')
   }
 
@@ -162,6 +330,7 @@ async function readLog(entry) {
     model: '',
     reasoningEffort: '',
     label: '',
+    catalogs: new Map(),
     firstPrompt: '',
     turn: 0,
     lastEventAt: 0,
@@ -215,15 +384,21 @@ async function readLog(entry) {
         if (typeof value.data?.agentModel === 'string') state.model = value.data.agentModel
         if (typeof value.data?.agentReasoningEffort === 'string') state.reasoningEffort = value.data.agentReasoningEffort
         break
-      case 'user/message': {
-        // The runtime-context and system-reminder messages are injected by the
-        // harness; the first real user prompt is the useful preview.
-        if (state.firstPrompt) break
-        const text = collapseWhitespace(userMessageText(value.data))
-        if (!text || text.startsWith('Current runtime context') || text.startsWith('<system-reminder>')) break
-        state.firstPrompt = text.slice(0, TASK_PREVIEW_LIMIT)
+      case 'subagent/catalog': {
+        // Announced in the *parent* log; label is attributed to the child id
+        // after every kept log has been folded.
+        const childId = typeof value.data?.childId === 'string' ? value.data.childId.trim() : ''
+        const label = typeof value.data?.label === 'string' ? value.data.label.trim() : ''
+        if (childId && label) state.catalogs.set(childId, label)
         break
       }
+      case 'agent/inbox/spliced':
+        collectFirstPrompt(state, value.data, { spliced: true })
+        break
+      case 'user/message':
+        // Kept for other DSH versions; this build uses agent/inbox/spliced.
+        collectFirstPrompt(state, value.data)
+        break
       case 'assistant/message':
         addTokens(state.tokens, value.data?.usage)
         if (state.lastStart) addTokens(state.turnTokens, value.data?.usage)
@@ -238,7 +413,7 @@ async function readLog(entry) {
   return result
 }
 
-/** PIDs of the running desktop host; their sessions are the app's own. */
+/** PIDs of the running desktop host (darwin `ps`; Windows uses the CIM table). */
 async function desktopPids() {
   const now = Date.now()
   if (now - desktopPidsCache.at < 5000) return desktopPidsCache.value
@@ -257,6 +432,9 @@ async function desktopPids() {
 
 /** Holder PIDs for a session lock; `null` means the check was unavailable. */
 async function lockHolders(lockPath) {
+  // Windows has no cross-process session lock at all; the no-lock heuristics in
+  // src/win/liveness.mjs replace it.
+  if (IS_WIN) return null
   const now = Date.now()
   const cached = holderCache.get(lockPath)
   if (cached && now - cached.at < 4000) return cached.value
@@ -273,70 +451,6 @@ async function lockHolders(lockPath) {
   return value
 }
 
-const SOURCE_LABELS = {
-  codex: 'Codex',
-  'claude-code': 'Claude Code',
-  cursor: 'Cursor',
-  'dsh-chat': 'DSH Chat',
-  terminal: 'Terminal',
-  unknown: 'Unknown'
-}
-
-const SOURCE_ALIASES = {
-  codex: 'codex',
-  chatgpt: 'codex',
-  claude: 'claude-code',
-  'claude-code': 'claude-code',
-  cursor: 'cursor',
-  'dsh-chat': 'dsh-chat',
-  terminal: 'terminal',
-  unknown: 'unknown'
-}
-
-function sourceKey(value) {
-  return String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-')
-}
-
-function canonicalSource(value) {
-  const key = sourceKey(value)
-  return SOURCE_ALIASES[key] || key || 'unknown'
-}
-
-function defaultSourceLabel(source) {
-  const key = sourceKey(source)
-  if (SOURCE_LABELS[key]) return SOURCE_LABELS[key]
-  if (!key) return 'Unknown'
-  return key.split('-').filter(Boolean).map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
-}
-
-/** Map one `ps` comm value (lowercased path included) to a launching agent. */
-function sourceFromCommand(command) {
-  const value = String(command || '').toLowerCase()
-  if (!value) return null
-  if (value.includes('codex') || value.includes('chatgpt')) return { source: 'codex', sourceLabel: 'Codex' }
-  if (value.includes('claude')) return { source: 'claude-code', sourceLabel: 'Claude Code' }
-  if (value.includes('cursor')) return { source: 'cursor', sourceLabel: 'Cursor' }
-  if (value.includes('dsh-chat')) return { source: 'dsh-chat', sourceLabel: 'DSH Chat' }
-  if (value.includes('iterm') || value.includes('terminal') || value.includes('zsh') || value.includes('bash') || value.includes('fish')) {
-    return { source: 'terminal', sourceLabel: 'Terminal' }
-  }
-  return null
-}
-
-/** Per-session metadata sidecars; a missing or malformed file is simply ignored. */
-function readSidecar(id) {
-  try {
-    const value = JSON.parse(readFileSync(join(SIDECAR_DIR, `${id}.json`), 'utf8'))
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
-  } catch {
-    return null
-  }
-}
-
-function explicitSourceValue(sidecar) {
-  return typeof sidecar?.source === 'string' ? sidecar.source.trim() : ''
-}
-
 /** One `ps` row from the parent walk; only comm/ppid are read (no env/secrets). */
 async function psRow(pid) {
   const { stdout } = await execFileAsync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], { timeout: 1000 })
@@ -347,7 +461,7 @@ async function psRow(pid) {
   return { ppid: Number(match[1]), comm: match[2].trim() }
 }
 
-/** Infer the launching agent by walking the lock holder's parent chain. */
+/** Infer the launching agent by walking the lock holder's parent chain (darwin). */
 async function inferSource(pid) {
   if (!Number.isFinite(pid) || pid <= 0) return null
   const now = Date.now()
@@ -375,11 +489,25 @@ async function inferSource(pid) {
     if (!value) value = terminal
   } catch {}
   sourceCache.set(pid, { at: now, value })
-  if (sourceCache.size > 64) {
+  if (sourceCache.size > CACHE_LIMIT) {
     const ordered = [...sourceCache.entries()].sort((a, b) => a[1].at - b[1].at)
-    for (const [id] of ordered.slice(0, sourceCache.size - 64)) sourceCache.delete(id)
+    for (const [id] of ordered.slice(0, sourceCache.size - CACHE_LIMIT)) sourceCache.delete(id)
   }
   return value
+}
+
+/** Per-session metadata sidecars; a missing or malformed file is simply ignored. */
+function readSidecar(id) {
+  try {
+    const value = JSON.parse(readFileSync(join(SIDECAR_DIR, `${id}.json`), 'utf8'))
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+function explicitSourceValue(sidecar) {
+  return sidecarSource(sidecar)
 }
 
 /** Explicit sidecar beats parent-chain inference; no signal means unknown. */
@@ -405,26 +533,30 @@ function colorKeyFor(id) {
 
 function buildInfo(header, state, now, meta = {}) {
   const id = String(header.id)
-  const active = state.lastStart !== null && (state.lastEnd === null || (Number(state.lastEnd.time) || 0) < (Number(state.lastStart.time) || 0))
+  const normalizedId = normalizeSessionId(id)
+  const shortId = normalizedId.slice(0, 8)
+  const active = openTurnFromState(state)
   const startedAt = Number(state.lastStart?.time) || Number(header.createdAt) || now
   const elapsedMs = active
     ? Math.max(0, now - startedAt)
     : state.lastStart && state.lastEnd
       ? Math.max(0, (Number(state.lastEnd.time) || 0) - (Number(state.lastStart.time) || 0))
       : 0
-  const shortId = id.slice(0, 8)
   const sidecar = meta.sidecar || null
   const explicitTitle = typeof sidecar?.title === 'string' ? sidecar.title.trim() : ''
   const sidecarTask = typeof sidecar?.task === 'string' ? clampPreview(sidecar.task) : ''
   const source = resolveSource(sidecar, meta.inferred)
+  // Child labels are announced by the parent log (subagent/catalog); older
+  // builds put them in the child log (subagent/descriptor).
+  const label = state.label || (typeof meta.catalogLabel === 'string' ? meta.catalogLabel : '') || ''
 
   return {
     id,
     shortId,
-    colorKey: colorKeyFor(id),
+    colorKey: colorKeyFor(normalizedId),
     parentSession: typeof header.parentSession === 'string' ? header.parentSession : null,
     depth: Number(header.delegationDepth) || 0,
-    title: explicitTitle || state.title || state.label || fallbackTitle(header, shortId),
+    title: explicitTitle || state.title || label || state.firstPrompt || fallbackTitle(header, shortId),
     titleSource: explicitTitle ? 'explicit' : 'fallback',
     source: source.source,
     sourceLabel: source.sourceLabel,
@@ -437,7 +569,7 @@ function buildInfo(header, state, now, meta = {}) {
     turn: state.turn,
     model: state.model,
     reasoningEffort: state.reasoningEffort,
-    label: state.label,
+    label,
     tokens: state.tokens,
     turnTokens: state.turnTokens,
     lastEventAt: state.lastEventAt,
@@ -477,58 +609,287 @@ let holderCache = new Map()
 let sourceCache = new Map()
 let desktopPidsCache = { at: 0, value: new Set() }
 let refreshing = false
-let lastSnapshot = { schemaVersion: 2, updatedAt: 0, roots: [], totals: { sessions: 0, children: 0, activeChildren: 0, tokens: emptyTokens() }, daemonPid: process.pid }
+let mode = judgmentMode({ platform: PLATFORM })
+let lastSnapshot = {
+  schemaVersion: 2,
+  updatedAt: 0,
+  roots: [],
+  totals: { sessions: 0, children: 0, activeChildren: 0, tokens: emptyTokens() },
+  daemonPid: process.pid
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Write the status document atomically. On Windows `renameSync` replaces the
+ * target, but the overlay may hold it open for a moment (EPERM/EBUSY), so retry
+ * three times and finally fall back to an in-place write.
+ */
+async function writeAtomic(filePath, data) {
+  const temp = `${filePath}.tmp-${process.pid}`
+  writeFileSync(temp, data, { mode: 0o600 })
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      renameSync(temp, filePath)
+      return true
+    } catch (error) {
+      const retriable = error?.code === 'EPERM' || error?.code === 'EACCES' || error?.code === 'EBUSY'
+      if (!retriable) break
+      await sleep(20)
+    }
+  }
+  writeFileSync(filePath, data, { mode: 0o600 })
+  try {
+    rmSync(temp, { force: true })
+  } catch {}
+  return false
+}
 
 async function refresh() {
   if (refreshing) return
   refreshing = true
+  const startHr = performance.now()
+  let kept = 0
+  let rootCount = 0
+  let leaseProbeState = 'unavailable'
+  let sourceProbe = 'none'
+  let leaseUsed = false
+  let includeAmbiguous = false
   try {
     const now = Date.now()
-    const desktops = await desktopPids()
-    const entries = listLogs()
-    const infos = []
 
-    for (const entry of entries) {
-      const lockPath = join(entry.dir, 'session.lock')
-      const holders = await lockHolders(lockPath)
-      // No holder means the run is gone; do not decode its log at all.
-      if (holders && holders.length === 0) continue
-      // Skip sessions owned by this machine's desktop host; the daemon is for
-      // terminal-driven runs. When no desktop is running, all sessions count.
-      if (holders && holders.some((pid) => desktops.has(pid))) continue
-
-      let record
-      try {
-        record = await readLog(entry)
-      } catch (error) {
-        log(`read ${entry.id}: ${String(error)}`)
-        continue
+    // One CIM query per cache window on Windows; `null` means "unavailable",
+    // never "nothing running", so decisions fail open below.
+    let table = null
+    let desktops = null
+    let leaseScan = null
+    if (IS_WIN) {
+      table = await getProcessTable()
+      desktops = table ? desktopHostPids(table) : null
+      if (!table) {
+        logThrottled('process-table', 'process table unavailable; source inference degraded')
       }
-      const header = record.header
-      if (!header?.id) continue
-      const depth = Number(header.delegationDepth) || 0
-      if (depth > 1) continue
-      const createdAt = Number(header.createdAt) || 0
-      if (createdAt > 0 && now - createdAt > RECENT_WINDOW_MS) continue
+      // Primary liveness signal: DSH's kernel write leases. One handle-table
+      // scan per refresh (cached 1500ms); null = probe unavailable -> T4.
+      if (!DISABLE_LEASE_PROBE) {
+        leaseScan = await scanLeases({ onError: (message) => logThrottled('lease-probe', message) })
+      }
+    } else {
+      desktops = await desktopPids()
+    }
+    const desktopPresent = Boolean(desktops && desktops.size > 0)
+    const external = IS_WIN ? externalCliPids(table) : null
+    const pidChain = table ? (pid) => parentChain(pid, 8, table) : null
+    const pidAlive = table ? (pid) => table.has(pid) : null
+    const entries = listLogs()
 
-      // Sidecar metadata is tiny and explicit; only fall back to the parent
-      // chain when the launcher did not identify itself.
-      const sidecar = readSidecar(entry.id)
-      const inferred = !explicitSourceValue(sidecar) && holders && holders.length > 0
-        ? await inferSource(holders[0])
-        : null
-      infos.push(buildInfo(header, record.state, now, { sidecar, inferred }))
+    // Guard: a probe that reports no lease for ANY session of this store is not
+    // describing this store (synthetic/temporary DSH_HOME in tests, or a store
+    // where every session is currently dead). Either way the precise signal is
+    // unusable here - fall back instead of declaring every session dead.
+    if (leaseScan) {
+      const anyMatch = entries.some((entry) => leaseScan.has(leaseHash(entry.dir)))
+      if (!anyMatch) {
+        logThrottled('lease-mismatch', 'lease probe reports no lease for this session store; falling back to mtime/sidecar')
+        leaseScan = null
+      }
+    }
+    leaseUsed = leaseScan !== null
+    leaseProbeState = leaseUsed ? 'ok' : 'unavailable'
+    // Holder PIDs are precise in lease mode, so ambiguity never arises there.
+    // Only the fallback path needs the (default-on) ambiguous inclusion.
+    includeAmbiguous = INCLUDE_AMBIGUOUS_ENV === null ? true : INCLUDE_AMBIGUOUS_ENV
+    let sidecarInfluenced = false
+    const noteSourceProbe = (value) => {
+      if (value === 'cim' || (value === 'sidecar' && sourceProbe === 'none')) sourceProbe = value
     }
 
-    const byId = new Map(infos.map((info) => [info.id, info]))
+    // Pass 1: attribution + liveness from cheap signals only (stat, sidecar,
+    // process table). Kept candidates get their log decoded below; ambiguous
+    // ones stay undecoded unless they can inherit attribution from a parent.
+    const candidates = []
+    for (const entry of entries) {
+      try {
+        const stat = statSync(entry.logPath)
+        const sidecar = readSidecar(entry.id)
+        const candidate = {
+          entry,
+          stat,
+          sidecar,
+          keep: false,
+          ambiguous: false,
+          leased: false,
+          holders: null,
+          sidecarInfluenced: false
+        }
+        if (IS_WIN) {
+          if (leaseUsed) {
+            // mac-equivalent chain: the lease holder decides live + ownership.
+            const holders = leaseScan.get(leaseHash(entry.dir)) || []
+            // No holder = the session is dead; do not decode its log at all.
+            if (holders.length === 0) continue
+            // Sessions owned by the desktop host subtree are the app's own.
+            if (!INCLUDE_DESKTOP && desktops && holders.some((pid) => desktops.has(pid))) continue
+            candidate.keep = true
+            candidate.holders = holders
+            candidate.leased = true
+          } else {
+            // T4 fallback: attribution first, then mtime/sidecar liveness.
+            const ownership = windowsOwnership({
+              sidecar,
+              desktopPresent,
+              includeAmbiguous,
+              includeDesktop: INCLUDE_DESKTOP,
+              desktopPids: desktops,
+              pidChain
+            })
+            candidate.ambiguous = ownership.ambiguous
+            if (ownership.keep) {
+              const liveCheck = windowsLive({
+                now,
+                mtimeMs: stat.mtimeMs,
+                sidecar,
+                liveMs: LIVE_MS,
+                pidAlive,
+                externalCliPids: external
+              })
+              candidate.keep = liveCheck.live
+              candidate.sidecarInfluenced = ownership.via === 'sidecar' || liveCheck.via === 'sidecar'
+            }
+          }
+        } else {
+          const lockPath = join(entry.dir, 'session.lock')
+          const holders = await lockHolders(lockPath)
+          candidate.holders = holders
+          // No holder means the run is gone; do not decode its log at all.
+          if (holders && holders.length === 0) continue
+          // Skip sessions owned by this machine's desktop host; the daemon is
+          // for terminal-driven runs. When no desktop is running, all count.
+          if (holders && holders.some((pid) => desktops.has(pid))) continue
+          candidate.keep = true
+        }
+        candidates.push(candidate)
+      } catch (error) {
+        logThrottled(`entry:${entry.id}`, `read ${entry.id}: ${String(error?.message || error)}`)
+      }
+    }
+
+    const collected = []
+    // Decode + apply the per-session filters that need the folded log state.
+    const acceptRecord = async (candidate) => {
+      const record = await readLog(candidate.entry, candidate.stat)
+      if (!record?.header?.id) return null
+      const header = record.header
+      const depth = Number(header.delegationDepth) || 0
+      if (depth > 1) return null
+      const createdAt = Number(header.createdAt) || 0
+      if (createdAt > 0 && now - createdAt > RECENT_WINDOW_MS) return null
+      if (IS_WIN && !candidate.leased) {
+        // Zombie filter only matters when mtime/sidecar decide liveness; a held
+        // lease already proves a live writer.
+        const openTurn = openTurnFromState(record.state)
+        if (isZombie({ openTurn, lastEventAt: record.state.lastEventAt, now, staleMs: STALE_MS })) return null
+      }
+      let inferred = null
+      if (IS_WIN) {
+        // Lease holders are the authoritative source signal; sidecar.pid is the
+        // degraded-path fallback.
+        const holderPid = candidate.leased
+          ? candidate.holders?.[0]
+          : sidecarPid(candidate.sidecar)
+        if (holderPid && table) inferred = inferSourceFromTable(holderPid, table)
+        if (inferred) noteSourceProbe('cim')
+        else if (explicitSourceValue(candidate.sidecar)) noteSourceProbe('sidecar')
+      } else if (!explicitSourceValue(candidate.sidecar) && candidate.holders && candidate.holders.length > 0) {
+        inferred = await inferSource(candidate.holders[0])
+      }
+      if (candidate.sidecarInfluenced) sidecarInfluenced = true
+      return { header, state: record.state, sidecar: candidate.sidecar, inferred, project: candidate.entry.project }
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate.keep) continue
+      try {
+        const item = await acceptRecord(candidate)
+        if (item) collected.push(item)
+      } catch (error) {
+        logThrottled(`entry:${candidate.entry.id}`, `read ${candidate.entry.id}: ${String(error?.message || error)}`)
+      }
+    }
+
+    // Pass 2 (win32): subagent sessions of an externally driven run carry no
+    // sidecar of their own. When their parent session is proven external, the
+    // child inherits that attribution and must not be hidden.
+    if (IS_WIN && collected.length > 0) {
+      const keptIds = new Set()
+      const projectsWithKept = new Set()
+      const noteKept = (item) => {
+        keptIds.add(String(item.header.id))
+        keptIds.add(normalizeSessionId(item.header.id))
+        if (item.project) projectsWithKept.add(item.project)
+      }
+      for (const item of collected) noteKept(item)
+      let added = true
+      let rounds = 0
+      while (added && rounds < 3) {
+        added = false
+        rounds += 1
+        for (const candidate of candidates) {
+          if (candidate.keep || !candidate.ambiguous) continue
+          // Parent and child sessions always share one project directory.
+          if (!projectsWithKept.has(candidate.entry.project)) continue
+          try {
+            const record = await readLog(candidate.entry, candidate.stat)
+            const parentId = typeof record?.header?.parentSession === 'string' ? record.header.parentSession : ''
+            if (!parentId) continue
+            if (!keptIds.has(parentId) && !keptIds.has(normalizeSessionId(parentId))) continue
+            const item = await acceptRecord(candidate)
+            if (!item) continue
+            candidate.keep = true // never re-add the same session in a later round
+            noteKept(item)
+            collected.push(item)
+            added = true
+          } catch (error) {
+            logThrottled(`entry:${candidate.entry.id}`, `read ${candidate.entry.id}: ${String(error?.message || error)}`)
+          }
+        }
+      }
+    }
+
+    // subagent/catalog labels are announced in the parent's log; resolve them
+    // once all kept logs have been folded.
+    const catalogs = new Map()
+    for (const item of collected) {
+      for (const [childId, label] of item.state.catalogs) {
+        if (!catalogs.has(childId)) catalogs.set(childId, label)
+        const normalized = normalizeSessionId(childId)
+        if (!catalogs.has(normalized)) catalogs.set(normalized, label)
+      }
+    }
+
+    const infos = collected.map((item) => buildInfo(item.header, item.state, now, {
+      sidecar: item.sidecar,
+      inferred: item.inferred,
+      catalogLabel: catalogs.get(String(item.header.id)) || catalogs.get(normalizeSessionId(item.header.id)) || ''
+    }))
+
+    const byId = new Map()
+    const byNormalized = new Map()
+    for (const info of infos) {
+      byId.set(info.id, info)
+      const normalized = normalizeSessionId(info.id)
+      if (!byNormalized.has(normalized)) byNormalized.set(normalized, info)
+    }
     const roots = []
     for (const info of infos) {
       if (!info.parentSession) {
         roots.push(info)
         continue
       }
-      const parent = byId.get(info.parentSession)
-      if (parent) parent.children.push(info)
+      // Parent and child ids use different formats across DSH versions; keep
+      // the full id as the map key and fall back to the normalised form.
+      const parent = byId.get(info.parentSession) || byNormalized.get(normalizeSessionId(info.parentSession))
+      if (parent && parent !== info) parent.children.push(info)
     }
 
     const activeRoots = roots.filter((root) => root.active || root.children.some((child) => child.active))
@@ -551,33 +912,70 @@ async function refresh() {
         tokens: sumTokens(activeRoots.flatMap((root) => [root, ...root.children]))
       }
     }
-
-    mkdirSync(STATUS_DIR, { recursive: true })
-    const temp = `${STATUS_FILE}.tmp-${process.pid}`
-    writeFileSync(temp, JSON.stringify(lastSnapshot), { mode: 0o600 })
-    renameSync(temp, STATUS_FILE)
-    writeFileSync(STATE_FILE, JSON.stringify({ pid: process.pid, startedAt: processStart, zstd: ZSTD }), { mode: 0o600 })
-
-    if (cache.size > 64) {
-      const ordered = [...cache.entries()].sort((a, b) => (a[1].key > b[1].key ? 1 : -1))
-      for (const [id] of ordered.slice(0, cache.size - 64)) cache.delete(id)
-    }
+    mode = judgmentMode({ platform: PLATFORM, lease: leaseUsed, sidecarInfluenced })
+    kept = collected.length
+    rootCount = activeRoots.length
   } catch (error) {
-    log(`refresh: ${String(error)}`)
+    // A failed tick must keep the previous (valid) document in place.
+    logThrottled('refresh', `refresh: ${String(error?.stack || error)}`)
   } finally {
     refreshing = false
+  }
+
+  const elapsed = performance.now() - startHr
+  if (TIMING) {
+    process.stderr.write(`[refresh] ${elapsed.toFixed(1)}ms kept=${kept} roots=${rootCount} mode=${mode} leaseProbe=${leaseProbeState} sourceProbe=${IS_WIN ? sourceProbe : 'none'}\n`)
+  } else if (elapsed > 2000) {
+    log(`slow refresh ${elapsed.toFixed(0)}ms kept=${kept} roots=${rootCount} mode=${mode}`)
+  }
+
+  try {
+    mkdirSync(STATUS_DIR, { recursive: true })
+    await writeAtomic(STATUS_FILE, JSON.stringify(lastSnapshot))
+  } catch (error) {
+    logThrottled('status-write', `status.json: ${String(error?.message || error)}`)
+  }
+  try {
+    writeFileSync(STATE_FILE, JSON.stringify({
+      pid: process.pid,
+      startedAt: processStart,
+      zstd: ZSTD,
+      platform: PLATFORM,
+      mode,
+      // Diagnostics (status.json v2 schema is untouched).
+      leaseProbe: leaseProbeState,
+      sourceProbe: IS_WIN ? sourceProbe : 'none',
+      includeAmbiguous: IS_WIN ? (!leaseUsed && includeAmbiguous) : false
+    }))
+  } catch (error) {
+    logThrottled('state-write', `daemon.json: ${String(error?.message || error)}`)
+  }
+
+  if (cache.size > CACHE_LIMIT) {
+    const ordered = [...cache.entries()].sort((a, b) => (a[1].key > b[1].key ? 1 : -1))
+    for (const [id] of ordered.slice(0, cache.size - CACHE_LIMIT)) cache.delete(id)
   }
 }
 
 const processStart = Date.now()
-log(`daemon start pid=${process.pid} zstd=${ZSTD} home=${DSH_HOME}`)
+log(`daemon start pid=${process.pid} platform=${PLATFORM} zstd=${ZSTD} home=${DSH_HOME} status=${STATUS_FILE} mode=${mode}`)
 await refresh()
-setInterval(() => { void refresh() }, TICK_MS)
+setInterval(() => {
+  void refresh()
+}, TICK_MS)
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     try {
-      writeFileSync(STATUS_FILE, JSON.stringify({ schemaVersion: 2, updatedAt: Date.now(), daemonPid: process.pid, roots: [], totals: { sessions: 0, children: 0, activeChildren: 0, tokens: emptyTokens() } }), { mode: 0o600 })
+      const empty = {
+        schemaVersion: 2,
+        updatedAt: Date.now(),
+        daemonPid: process.pid,
+        roots: [],
+        totals: { sessions: 0, children: 0, activeChildren: 0, tokens: emptyTokens() }
+      }
+      mkdirSync(STATUS_DIR, { recursive: true })
+      writeFileSync(STATUS_FILE, JSON.stringify(empty), { mode: 0o600 })
     } catch {}
     process.exit(0)
   })

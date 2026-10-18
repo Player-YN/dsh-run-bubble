@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>RunBubbleOverlay</AssemblyName>
+    <RootNamespace>DshRunBubble</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Version>0.3.0</Version>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- The SDK default glob picks up Models.cs/Theme.cs/BubbleRenderer.cs/DemoData.cs
+         (owned by overlay-render) automatically; nothing is listed explicitly here. -->
+  </PropertyGroup>
+
+</Project>
