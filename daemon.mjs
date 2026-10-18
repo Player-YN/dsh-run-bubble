@@ -97,9 +97,38 @@ function envFlagOptional(name) {
 
 const LIVE_MS = envMs('RUN_BUBBLE_LIVE_MS', DEFAULT_LIVE_MS)
 const STALE_MS = envMs('RUN_BUBBLE_STALE_MS', DEFAULT_STALE_MS)
-// Show the desktop app's own sessions too (lease mode only). Off by default,
-// matching macOS behaviour.
-const INCLUDE_DESKTOP = envFlag('RUN_BUBBLE_INCLUDE_DESKTOP', false)
+// Show the desktop app's own sessions too. Resolution order:
+// RUN_BUBBLE_INCLUDE_DESKTOP (when set) > config.json `includeDesktop` > false.
+// The overlay's monitor button writes config.json, so the GUI toggle needs no env.
+const CONFIG_FILE = join(STATUS_DIR, 'config.json')
+let configCacheKey = ''
+let configCacheValue = null
+
+/** `$DSH_HOME/run-bubble/config.json`, re-read only when size/mtime change. */
+function readRuntimeConfig() {
+  try {
+    const stat = statSync(CONFIG_FILE)
+    const key = `${stat.size}:${stat.mtimeMs}`
+    if (key === configCacheKey) return configCacheValue
+    const parsed = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'))
+    const value = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+    configCacheKey = key
+    configCacheValue = value
+    return value
+  } catch {
+    configCacheKey = ''
+    configCacheValue = null
+    return null
+  }
+}
+
+/** Tri-state env wins when present; otherwise the GUI/config value; default off. */
+function resolveIncludeDesktop() {
+  const fromEnv = envFlagOptional('RUN_BUBBLE_INCLUDE_DESKTOP')
+  if (fromEnv !== null) return fromEnv
+  const config = readRuntimeConfig()
+  return config && typeof config.includeDesktop === 'boolean' ? config.includeDesktop : false
+}
 // Force the T4 mtime/sidecar fallback even if a probe is present (tests/CI).
 const DISABLE_LEASE_PROBE = envFlag('RUN_BUBBLE_DISABLE_LEASE_PROBE', false)
 // Tri-state: only the *fallback* path consults it. In fallback mode ambiguous
@@ -655,6 +684,7 @@ async function refresh() {
   let sourceProbe = 'none'
   let leaseUsed = false
   let includeAmbiguous = false
+  let includeDesktop = false
   try {
     const now = Date.now()
 
@@ -699,6 +729,8 @@ async function refresh() {
     // Holder PIDs are precise in lease mode, so ambiguity never arises there.
     // Only the fallback path needs the (default-on) ambiguous inclusion.
     includeAmbiguous = INCLUDE_AMBIGUOUS_ENV === null ? true : INCLUDE_AMBIGUOUS_ENV
+    // Re-read every tick: the overlay's monitor button flips this at runtime.
+    includeDesktop = resolveIncludeDesktop()
     let sidecarInfluenced = false
     const noteSourceProbe = (value) => {
       if (value === 'cim' || (value === 'sidecar' && sourceProbe === 'none')) sourceProbe = value
@@ -729,7 +761,7 @@ async function refresh() {
             // No holder = the session is dead; do not decode its log at all.
             if (holders.length === 0) continue
             // Sessions owned by the desktop host subtree are the app's own.
-            if (!INCLUDE_DESKTOP && desktops && holders.some((pid) => desktops.has(pid))) continue
+            if (!includeDesktop && desktops && holders.some((pid) => desktops.has(pid))) continue
             candidate.keep = true
             candidate.holders = holders
             candidate.leased = true
@@ -739,7 +771,7 @@ async function refresh() {
               sidecar,
               desktopPresent,
               includeAmbiguous,
-              includeDesktop: INCLUDE_DESKTOP,
+              includeDesktop,
               desktopPids: desktops,
               pidChain
             })
@@ -945,7 +977,8 @@ async function refresh() {
       // Diagnostics (status.json v2 schema is untouched).
       leaseProbe: leaseProbeState,
       sourceProbe: IS_WIN ? sourceProbe : 'none',
-      includeAmbiguous: IS_WIN ? (!leaseUsed && includeAmbiguous) : false
+      includeAmbiguous: IS_WIN ? (!leaseUsed && includeAmbiguous) : false,
+      includeDesktop: IS_WIN ? includeDesktop : false
     }))
   } catch (error) {
     logThrottled('state-write', `daemon.json: ${String(error?.message || error)}`)

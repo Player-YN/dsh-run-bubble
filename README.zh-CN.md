@@ -34,6 +34,11 @@
 
 ---
 
+> **为外部 Agent 调用而设计。** 这个气泡服务的是"由**别的** agent 驱动 DSH"的场景——
+> Codex、Claude Code、Cursor、脚本或 CI 用 `dsh --profile acp|headless|sdk` 起会话。
+> 桌面端自己的聊天会话默认被过滤，避免同一个对话出现两个气泡；想一起看，点面板里的
+> 显示器按钮（或 `config.json` 里 `"includeDesktop": true`）即可。
+
 ## 为什么做这个
 
 现在越来越多的编码 Agent 在后台运行：Codex、Claude Code、Cursor，或者一个脚本化的 ACP
@@ -54,21 +59,23 @@
 - 盯 token 消耗、模型和 reasoning effort；
 - 不想一直开着 DSH 桌面端，但仍想保留一个状态入口。
 
-> 气泡只显示通过 `dsh --profile acp`、`headless` 或 `sdk` 启动的**外部会话**。
+> 气泡默认只显示通过 `dsh --profile acp`、`headless` 或 `sdk` 启动的**外部会话**。
 > 桌面端自己的聊天会话会被过滤，避免同一个对话出现两个气泡。
 
 ## 功能
 
 | | |
 |---|---|
-| **常驻** | 空闲时缩成小胶囊，不隐藏；展开后可钉住。 |
+| **极简空闲态** | 空闲时收缩成约 55 × 26 px、宽度随文案自适应的胶囊，不隐藏。 |
 | **多主 Session** | 每个 root 有稳定颜色、短 id（`#a1b2`）、来源 chip、标题和任务预览。 |
 | **子 Agent** | 所有运行中的子 Agent 挂在对应 root 下；点击 root 可展开/收起。 |
 | **结构化信息** | 来源、id、子数量、模型、推理强度、turn 分别用 chips 展示，不再是一整行同色灰字。 |
 | **钉子** | 钉住展开态，鼠标移出也不收起；状态持久化。 |
 | **拖动与滚动** | 长按 ~350ms 拖动，右下角锚点持久化；内容超过 420px 垂直滚动。 |
 | **Token 统计** | 输入 / 输出 / 缓存读取 / 总量，按 root 和子 Agent 汇总。 |
-| **原生轻量** | AppKit + launchd，overlay 约 47MB；不需要辅助功能或录屏权限。 |
+| **一键切换桌面会话** | 面板里的显示器按钮，图标切换桌面端会话是否显示，无文字无菜单。 |
+| **全屏时自动让位** | 检测到游戏/视频等全屏应用占据所在显示器时自动隐藏，结束后自动回来。 |
+| **原生轻量** | macOS 用 AppKit `NSPanel`，Windows 用分层 Win32 窗口；不需要辅助功能或录屏权限。 |
 | **纯本地** | 无服务端、无遥测、无账号，只读本地日志和 sidecar。 |
 
 ## 截图
@@ -169,7 +176,7 @@ pwsh -File .\run-bubble.ps1 uninstall   # 保留 ~\.dsh\run-bubble\* 不动
 
 <p align="center">
   <img src="docs/images/windows/expanded.png" alt="Windows 展开态" width="356">
-  <img src="docs/images/windows/pill.png" alt="Windows 空闲胶囊" width="238">
+  <img src="docs/images/windows/pill.png" alt="Windows 空闲胶囊" width="56">
   <br><sub><b>Windows。</b>分层 Win32 窗口 + 逐像素 alpha；空闲胶囊常驻不隐藏。
   更多状态（含浅色主题）见 <code>docs/images/windows/</code>。</sub>
 </p>
@@ -181,7 +188,20 @@ pwsh -File .\run-bubble.ps1 uninstall   # 保留 ~\.dsh\run-bubble\* 不动
 
 Windows 上的归属是**精确**判定的：DSH 为每个会话持有一个命名内核信号量
 （`Local\dsh-session-lock-<sha256>`），daemon 直接读出真实持有者 PID 再与桌面宿主比对，
-而不是靠猜。就想在气泡里看到桌面端的会话？设 `RUN_BUBBLE_INCLUDE_DESKTOP=1`。
+而不是靠猜。
+
+就想在气泡里看到桌面端的会话？点展开面板里的 **显示器按钮**——即时生效并写入
+`config.json`，下次启动保持。（脚本/CI 仍可用 `RUN_BUBBLE_INCLUDE_DESKTOP=1`。）
+
+### 面板行为
+
+- 展开/折叠：悬停胶囊展开，移开折叠；钉子可保持常开。
+- 空闲胶囊刻意做得极小（约 55 × 26 px），宽度随文案自适应。
+- **全屏应用会自动把它藏起来。** 当前台窗口铺满气泡所在的那块显示器（游戏、全屏视频、
+  演示文稿）时自动隐藏，窗口消失后自动恢复。想关掉这个行为，在 `config.json` 里设
+  `"hideOnFullscreen": false`。
+
+头部两个图标，从左到右：**显示器**（显示/隐藏桌面会话）、**钉子**。没有文字，没有菜单。
 
 ### 从其他 Agent 调用 DSH
 
@@ -274,6 +294,18 @@ flowchart LR
 }
 ```
 
+### `config.json`（overlay ↔ daemon）
+
+由面板的显示器按钮写入，两个进程都读取。
+
+```json
+{ "includeDesktop": false, "hideOnFullscreen": true }
+```
+
+路径：`$DSH_HOME/run-bubble/config.json`（默认 `~/.dsh/run-bubble/config.json`）。
+`includeDesktop` 的优先级：`RUN_BUBBLE_INCLUDE_DESKTOP` 环境变量 → `config.json` → `false`。
+未知字段会被保留。
+
 ### Sidecar（可选，显式）
 
 ```json
@@ -315,6 +347,7 @@ flowchart LR
 | `%USERPROFILE%\.dsh\run-bubble\sessions\` | 可选 sidecar |
 | `%USERPROFILE%\.dsh\run-bubble\position.json` | 拖动锚点 + 钉子状态 |
 | `%USERPROFILE%\.dsh\run-bubble\daemon.json` | daemon pid + 判定模式（`win-lease` / `win-mtime`） |
+| `%USERPROFILE%\.dsh\run-bubble\config.json` | 面板开关：`includeDesktop`、`hideOnFullscreen` |
 
 ## 隐私与安全
 
@@ -334,8 +367,10 @@ flowchart LR
 
 - **两套 overlay，一个引擎。** macOS 用 Swift/AppKit（`overlay.swift`）；Windows 用
   C#/.NET 8 + 分层 Win32 窗口（`src/overlay/`）。daemon 与 `status.json` 契约共用。
-- **仅外部会话。** 桌面端聊天会话会被过滤，避免重复。Windows 上可用
-  `RUN_BUBBLE_INCLUDE_DESKTOP=1` 显式包含。
+- **仅外部会话。** 桌面端聊天会话默认被过滤，避免重复；面板的显示器按钮或
+  `config.json` 里的 `"includeDesktop": true` 可随时把它们放回来。
+- **全屏识别基于窗口矩形。** 无边框全屏与普通全屏都能可靠识别；使用*独占* DirectX
+  全屏的游戏会把桌面切走，此时气泡本来就不可见（无需处理）。
 - **Windows 活跃性依赖探针。** 租约探测需要 `DshLeaseProbe.exe`；缺失时降级为
   `mtime`/sidecar 启发式（`mode: "win-mtime"`），对长时间静默的会话可能短暂误判。
   不经 `interop/dsh-chat` 启动的外部 `dsh --profile acp` 没有 sidecar，来源在探针

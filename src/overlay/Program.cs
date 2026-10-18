@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows.Forms;
 
 namespace DshRunBubble;
@@ -11,6 +13,7 @@ namespace DshRunBubble;
 internal static class Program
 {
     private const string StatusFileName = "status.json";
+    private const string ConfigFileName = "config.json";
     private const double StatusExpirySeconds = 6.0;
     private const int ReloadIntervalMs = 500;
     private const int PulseIntervalMs = 600;
@@ -18,6 +21,9 @@ internal static class Program
 
     private static BubbleWindow? _window;
     private static string _statusPath = string.Empty;
+    private static string _configPath = string.Empty;
+    private static OverlayConfig _config = new();
+    private static DateTime _configStamp = DateTime.MinValue;
     private static bool _demoMode;
     private static bool _dark;
 
@@ -51,7 +57,11 @@ internal static class Program
 
         bool anyDemo = demo || demoMany || demoRoots || demoIdle;
         _demoMode = anyDemo;
-        _statusPath = ResolveStatusPath();
+        string stateDir = ResolveStateDir();
+        _statusPath = Path.Combine(stateDir, StatusFileName);
+        _configPath = Path.Combine(stateDir, ConfigFileName);
+        _config = ReadConfig(_configPath);
+        _configStamp = ConfigStamp();
 
         if (HasFlag(args, "--dark"))
         {
@@ -136,6 +146,9 @@ internal static class Program
         {
             _window = new BubbleWindow(theme, snapshotMode: false);
             _window.EnsureReady();
+            _window.SetIncludeDesktop(_config.IncludeDesktop);
+            _window.SetHideOnFullscreen(_config.HideOnFullscreen);
+            _window.IncludeDesktopChanged += OnIncludeDesktopToggled;
             // Resident start-up is collapsed; demo flags (and pin) open it, exactly
             // like macOS: pinned || ((demo) && !collapsed).
             _window.SetInitialExpanded(anyDemo && !collapsed);
@@ -224,6 +237,17 @@ internal static class Program
             }
         }
 
+        // Shared switches + fullscreen auto-hide run on the same 500 ms tick.
+        RefreshConfigIfChanged();
+        try
+        {
+            _window?.UpdateFullscreenVisibility();
+        }
+        catch (Exception ex)
+        {
+            Stderr("fullscreen check failed: " + ex.Message);
+        }
+
         if (_demoMode || _window == null)
         {
             return;
@@ -252,6 +276,7 @@ internal static class Program
             // No HWND is created: rendering is pure GDI+ into an offscreen bitmap,
             // so this also works without a desktop session.
             var window = new BubbleWindow(theme, snapshotMode: true);
+            window.SetIncludeDesktop(_config.IncludeDesktop);
             window.SetInitialExpanded(!collapsed);
             window.Apply(anyDemo
                 ? BuildDemoRoots(demoIdle, demoMany, demoRoots)
@@ -319,12 +344,17 @@ internal static class Program
         }
     }
 
-    private static string ResolveStatusPath()
+    /// <summary>
+    /// Directory that holds status.json / config.json. <c>RUN_BUBBLE_STATUS_DIR</c>
+    /// wins, then <c>DSH_HOME</c>, then <c>%USERPROFILE%\.dsh</c>; always suffixed
+    /// with <c>run-bubble</c> unless the override already points at it.
+    /// </summary>
+    private static string ResolveStateDir()
     {
         string? dir = Environment.GetEnvironmentVariable("RUN_BUBBLE_STATUS_DIR");
         if (!string.IsNullOrEmpty(dir))
         {
-            return Path.Combine(dir, StatusFileName);
+            return dir;
         }
 
         string? home = Environment.GetEnvironmentVariable("DSH_HOME");
@@ -334,7 +364,138 @@ internal static class Program
             home = Path.Combine(profile, ".dsh");
         }
 
-        return Path.Combine(home, "run-bubble", StatusFileName);
+        return Path.Combine(home, "run-bubble");
+    }
+
+    // ------------------------------------------------------------------
+    // config.json (shared with the daemon, see docs/PORT-WINDOWS.md §11.3)
+    // ------------------------------------------------------------------
+
+    private sealed class OverlayConfig
+    {
+        public bool IncludeDesktop;
+        public bool HideOnFullscreen = true;
+    }
+
+    private static DateTime ConfigStamp()
+    {
+        try
+        {
+            return File.Exists(_configPath) ? File.GetLastWriteTimeUtc(_configPath) : DateTime.MinValue;
+        }
+        catch
+        {
+            return DateTime.MinValue;
+        }
+    }
+
+    private static OverlayConfig ReadConfig(string path)
+    {
+        var config = new OverlayConfig();
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return config;
+            }
+
+            using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(path));
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return config;
+            }
+
+            if (root.TryGetProperty("includeDesktop", out JsonElement include)
+                && (include.ValueKind == JsonValueKind.True || include.ValueKind == JsonValueKind.False))
+            {
+                config.IncludeDesktop = include.GetBoolean();
+            }
+
+            if (root.TryGetProperty("hideOnFullscreen", out JsonElement hide)
+                && (hide.ValueKind == JsonValueKind.True || hide.ValueKind == JsonValueKind.False))
+            {
+                config.HideOnFullscreen = hide.GetBoolean();
+            }
+        }
+        catch (Exception ex)
+        {
+            Stderr("config read failed: " + ex.Message);
+        }
+
+        return config;
+    }
+
+    /// <summary>
+    /// Atomically writes the two known switches while preserving every other key
+    /// the daemon or a future version may have stored.
+    /// </summary>
+    private static bool WriteConfig(OverlayConfig config)
+    {
+        try
+        {
+            JsonObject root;
+            try
+            {
+                root = File.Exists(_configPath)
+                    ? JsonNode.Parse(File.ReadAllText(_configPath)) as JsonObject ?? new JsonObject()
+                    : new JsonObject();
+            }
+            catch
+            {
+                root = new JsonObject();
+            }
+
+            root["includeDesktop"] = config.IncludeDesktop;
+            root["hideOnFullscreen"] = config.HideOnFullscreen;
+
+            string json = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n";
+            string? dir = Path.GetDirectoryName(_configPath);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+
+            string tmp = _configPath + ".tmp-" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, _configPath, overwrite: true);
+
+            _configStamp = ConfigStamp();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Stderr("config write failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    private static void OnIncludeDesktopToggled(bool includeDesktop)
+    {
+        _config.IncludeDesktop = includeDesktop;
+        WriteConfig(_config);
+    }
+
+    /// <summary>Picks up manual edits of config.json without a restart.</summary>
+    private static void RefreshConfigIfChanged()
+    {
+        try
+        {
+            DateTime stamp = ConfigStamp();
+            if (stamp == _configStamp)
+            {
+                return;
+            }
+
+            _configStamp = stamp;
+            _config = ReadConfig(_configPath);
+            _window?.SetIncludeDesktop(_config.IncludeDesktop);
+            _window?.SetHideOnFullscreen(_config.HideOnFullscreen);
+        }
+        catch (Exception ex)
+        {
+            Stderr("config refresh failed: " + ex.Message);
+        }
     }
 
     // ------------------------------------------------------------------

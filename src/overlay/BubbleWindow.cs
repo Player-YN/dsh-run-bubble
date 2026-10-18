@@ -3,6 +3,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows.Forms;
 
@@ -22,9 +23,10 @@ namespace DshRunBubble;
 /// </summary>
 internal sealed class BubbleWindow : Form
 {
-    private const int CollapsedWidth = 238;
     private const int ExpandedWidth = 356;
-    private const float CollapsedHeight = 42f;
+    private const int MinCollapsedWidth = 52;
+    private const int MaxCollapsedWidth = 238;
+    private const float CollapsedHeight = 26f;
     private const float PinSize = 18f;
     private const float PinTop = 6f;
     private const float PinRight = 14f;
@@ -44,7 +46,7 @@ internal sealed class BubbleWindow : Form
 
     // DPI + surface ------------------------------------------------------
     private float _scale = 1f;
-    private float _logicalW = CollapsedWidth;
+    private float _logicalW = MaxCollapsedWidth;
     private float _logicalH = CollapsedHeight;
     private int _pxW;
     private int _pxH;
@@ -70,7 +72,7 @@ internal sealed class BubbleWindow : Form
     // after UpdateLayeredWindow (which repositions the HWND without a
     // WM_WINDOWPOSCHANGED WinForms can observe), so the window layer tracks the
     // real rect itself and drives every position change through the OS.
-    private Rectangle _bounds = new Rectangle(0, 0, CollapsedWidth, (int)CollapsedHeight);
+    private Rectangle _bounds = new Rectangle(0, 0, MaxCollapsedWidth, (int)CollapsedHeight);
 
     // Interaction --------------------------------------------------------
     private bool _trackingLeave;
@@ -81,6 +83,14 @@ internal sealed class BubbleWindow : Form
     private Point _dragStartScreen;
     private Point _dragStartOrigin;
     private string? _toggleRootId;
+
+    // Fullscreen auto-hide -----------------------------------------------
+    private bool _hideOnFullscreen = true;
+    private bool _hiddenForFullscreen;
+    private bool _layoutDirty;
+
+    /// <summary>Raised when the user flips the desktop-sessions toggle.</summary>
+    public event Action<bool>? IncludeDesktopChanged;
 
     public BubbleWindow(Theme theme, bool snapshotMode)
     {
@@ -94,7 +104,7 @@ internal sealed class BubbleWindow : Form
         AutoScaleMode = AutoScaleMode.None;
         BackColor = Color.Black;
         Text = "DSH Run Bubble";
-        Size = new Size(CollapsedWidth, (int)CollapsedHeight);
+        Size = new Size(MaxCollapsedWidth, (int)CollapsedHeight);
         SetStyle(ControlStyles.Opaque, true);
         SetStyle(ControlStyles.UserPaint, true);
 
@@ -183,6 +193,24 @@ internal sealed class BubbleWindow : Form
         RenderNow();
     }
 
+    /// <summary>Mirrors config.json <c>includeDesktop</c> into the shared state.</summary>
+    public void SetIncludeDesktop(bool value)
+    {
+        if (_state.IncludeDesktop == value)
+        {
+            return;
+        }
+
+        _state.IncludeDesktop = value;
+        RenderNow();
+    }
+
+    /// <summary>Mirrors config.json <c>hideOnFullscreen</c>.</summary>
+    public void SetHideOnFullscreen(bool value)
+    {
+        _hideOnFullscreen = value;
+    }
+
     /// <summary>
     /// Applies a fresh set of roots. Keeps the previous non-empty state for a
     /// short grace window (macOS parity: a single empty poll between turns must
@@ -241,8 +269,9 @@ internal sealed class BubbleWindow : Form
 
     public void ShowBubble()
     {
-        if (_snapshotMode)
+        if (_snapshotMode || _hiddenForFullscreen)
         {
+            // Never resurrect the window while a fullscreen app owns the monitor.
             return;
         }
 
@@ -288,26 +317,17 @@ internal sealed class BubbleWindow : Form
 
     private void ApplyLayout()
     {
+        // Hidden for a fullscreen foreground window: remember that a relayout is
+        // due and skip the surface work; it is replayed by RestoreFromFullscreen.
+        if (_hiddenForFullscreen && !_snapshotMode)
+        {
+            _layoutDirty = true;
+            return;
+        }
+
         _scale = _snapshotMode ? 1f : GetScale();
-        _logicalW = _state.Expanded ? ExpandedWidth : CollapsedWidth;
-
-        float preferred;
-        try
-        {
-            preferred = _state.Expanded ? BubbleRenderer.PreferredHeight(_state) : CollapsedHeight;
-        }
-        catch (Exception ex)
-        {
-            LogRenderOnce(ex);
-            preferred = CollapsedHeight;
-        }
-
-        if (!(preferred > 0f) || float.IsNaN(preferred) || float.IsInfinity(preferred))
-        {
-            preferred = CollapsedHeight;
-        }
-
-        _logicalH = preferred;
+        _logicalW = ResolvePreferredWidth();
+        _logicalH = ResolvePreferredHeight();
 
         int pw = Math.Max(1, (int)Math.Round(_logicalW * _scale));
         int ph = Math.Max(1, (int)Math.Round(_logicalH * _scale));
@@ -331,6 +351,57 @@ internal sealed class BubbleWindow : Form
         }
     }
 
+    /// <summary>
+    /// Collapsed width is content-adaptive (renderer decides, clamped here as a
+    /// last line of defence); expanded width stays a fixed 356 DIP.
+    /// </summary>
+    private float ResolvePreferredWidth()
+    {
+        float width;
+        try
+        {
+            width = BubbleRenderer.PreferredWidth(_state);
+        }
+        catch (Exception ex)
+        {
+            LogRenderOnce(ex);
+            width = _state.Expanded ? ExpandedWidth : MaxCollapsedWidth;
+        }
+
+        if (!(width > 0f) || float.IsNaN(width) || float.IsInfinity(width))
+        {
+            width = _state.Expanded ? ExpandedWidth : MaxCollapsedWidth;
+        }
+
+        return Math.Clamp(width, MinCollapsedWidth, ExpandedWidth);
+    }
+
+    private float ResolvePreferredHeight()
+    {
+        if (!_state.Expanded)
+        {
+            return CollapsedHeight;
+        }
+
+        float preferred;
+        try
+        {
+            preferred = BubbleRenderer.PreferredHeight(_state);
+        }
+        catch (Exception ex)
+        {
+            LogRenderOnce(ex);
+            return CollapsedHeight;
+        }
+
+        if (!(preferred > 0f) || float.IsNaN(preferred) || float.IsInfinity(preferred))
+        {
+            return CollapsedHeight;
+        }
+
+        return preferred;
+    }
+
     public void RenderNow()
     {
         try
@@ -345,6 +416,13 @@ internal sealed class BubbleWindow : Form
 
     private void RenderFrame(Rectangle? destinationOrBounds)
     {
+        // Hidden for a fullscreen app: do not touch the surface at all. The
+        // pending frame is produced by RestoreFromFullscreen.
+        if (_hiddenForFullscreen && !_snapshotMode)
+        {
+            return;
+        }
+
         Bitmap? canvas = _canvas;
         if (canvas == null || _rendering)
         {
@@ -704,10 +782,12 @@ internal sealed class BubbleWindow : Form
 
         PointF logical = ToLogical(PointToClient(Cursor.Position));
 
-        // The pin button wins over both drag and root-toggle handling.
-        if (_state.Expanded && PinRect().Contains(logical))
+        // Icon buttons win over both drag and root-toggle handling, and an icon
+        // press never starts the long-press drag timer.
+        string? icon = HitIcon(logical);
+        if (icon != null)
         {
-            TogglePin();
+            ActivateIcon(icon);
             return;
         }
 
@@ -884,7 +964,7 @@ internal sealed class BubbleWindow : Form
 
     private void OnHoverLeave()
     {
-        if (_snapshotMode)
+        if (_snapshotMode || _hiddenForFullscreen)
         {
             return;
         }
@@ -933,6 +1013,293 @@ internal sealed class BubbleWindow : Form
         _hasAnchor = true;
         SavePosition();
         ApplyLayout();
+    }
+
+    // ------------------------------------------------------------------
+    // Icon buttons (pin / desktop sessions)
+    // ------------------------------------------------------------------
+
+    /// <summary>Hit-tests the renderer-published icon rects, in logical DIP.</summary>
+    private string? HitIcon(PointF logical)
+    {
+        RenderResult? result = _lastRender;
+        if (result?.Icons != null)
+        {
+            foreach (IconHit hit in result.Icons)
+            {
+                if (!string.IsNullOrEmpty(hit.Id) && hit.Bounds.Contains(logical))
+                {
+                    return hit.Id;
+                }
+            }
+        }
+
+        // Fallback only while the renderer does not publish icon rects yet.
+        if (_state.Expanded && PinRect().Contains(logical))
+        {
+            return "pin";
+        }
+
+        return null;
+    }
+
+    private void ActivateIcon(string id)
+    {
+        switch (id)
+        {
+            case "pin":
+                TogglePin();
+                break;
+
+            case "desktop":
+                ToggleIncludeDesktop();
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Flips the desktop-sessions toggle, redraws the icon immediately and lets
+    /// the host persist config.json. The daemon does the actual filtering on its
+    /// next refresh, so the row set changes on the following status poll.
+    /// </summary>
+    private void ToggleIncludeDesktop()
+    {
+        _state.IncludeDesktop = !_state.IncludeDesktop;
+        _hoverSuppressUntil = DateTime.UtcNow.AddSeconds(HoverSuppressSeconds);
+        RenderNow();
+
+        try
+        {
+            IncludeDesktopChanged?.Invoke(_state.IncludeDesktop);
+        }
+        catch (Exception ex)
+        {
+            LogInteropOnce(ex);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fullscreen auto-hide
+    // ------------------------------------------------------------------
+
+    private static readonly string[] ShellWindowClasses =
+    {
+        "Progman",
+        "WorkerW",
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "MultitaskingViewFrame",
+        "TaskSwitcherWnd",
+        "ForegroundStaging",
+    };
+
+    /// <summary>
+    /// Hosts that can stretch over a whole monitor without being the app the user
+    /// is actually in (IME/touch keyboard, shell flyouts, third-party overlays).
+    /// Hiding the bubble for these would be a false positive.
+    /// </summary>
+    private static readonly string[] IgnoredFullscreenProcesses =
+    {
+        "TextInputHost.exe",
+        "ShellExperienceHost.exe",
+        "StartMenuExperienceHost.exe",
+        "SearchHost.exe",
+        "GameBar.exe",
+        "GameBarFTServer.exe",
+        "NVIDIA Share.exe",
+        "NVIDIA Overlay.exe",
+    };
+
+    /// <summary>
+    /// Hides the bubble while another process owns a fullscreen window on the
+    /// bubble's monitor, and restores it (same place, without activation) when
+    /// that window goes away. Called from the 500 ms reload timer.
+    /// </summary>
+    public void UpdateFullscreenVisibility()
+    {
+        if (_snapshotMode || !IsHandleCreated)
+        {
+            return;
+        }
+
+        bool shouldHide = _hideOnFullscreen && IsFullscreenForegroundOnBubbleMonitor();
+        if (shouldHide == _hiddenForFullscreen)
+        {
+            // Watchdog: the OS visibility must agree with the flag. Without this a
+            // missed transition (window hidden while the flag says visible, or the
+            // reverse) would persist until some unrelated transition happened.
+            bool visible = Native.IsWindowVisible(Handle);
+            if (shouldHide ? visible : !visible)
+            {
+                if (shouldHide)
+                {
+                    HideForFullscreen();
+                }
+                else
+                {
+                    RestoreFromFullscreen();
+                }
+            }
+
+            return;
+        }
+
+        if (shouldHide)
+        {
+            HideForFullscreen();
+        }
+        else
+        {
+            RestoreFromFullscreen();
+        }
+    }
+
+    private void HideForFullscreen()
+    {
+        try
+        {
+            _hiddenForFullscreen = true;
+            _layoutDirty = false;
+
+            // Drop transient interaction state: the window is off screen.
+            _longPressTimer.Stop();
+            _pendingDrag = false;
+            _isDragging = false;
+            _toggleRootId = null;
+            _trackingLeave = false;
+
+            Native.ShowWindow(Handle, Native.SW_HIDE);
+        }
+        catch (Exception ex)
+        {
+            LogInteropOnce(ex);
+        }
+    }
+
+    private void RestoreFromFullscreen()
+    {
+        try
+        {
+            _hiddenForFullscreen = false;
+
+            Native.ShowWindow(Handle, Native.SW_SHOWNOACTIVATE);
+            Native.SetWindowPos(
+                Handle,
+                Native.HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE
+                    | Native.SWP_NOOWNERZORDER | Native.SWP_SHOWWINDOW);
+
+            if (_layoutDirty)
+            {
+                _layoutDirty = false;
+                ApplyLayout();
+            }
+            else
+            {
+                // Re-blit at the tracked rect: same position, no activation.
+                RenderFrame(_bounds);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogInteropOnce(ex);
+        }
+    }
+
+    private bool IsFullscreenForegroundOnBubbleMonitor()
+    {
+        try
+        {
+            IntPtr foreground = Native.GetForegroundWindow();
+            if (foreground == IntPtr.Zero || foreground == Handle)
+            {
+                return false;
+            }
+
+            if (!Native.IsWindowVisible(foreground) || Native.IsIconic(foreground))
+            {
+                return false;
+            }
+
+            Native.GetWindowThreadProcessId(foreground, out uint processId);
+            if (processId == (uint)Environment.ProcessId)
+            {
+                return false;
+            }
+
+            // Shell hosts and overlays can cover the monitor without being the app
+            // the user is actually in (IME, touch keyboard, Game Bar, NVIDIA overlay).
+            string processName = Native.GetProcessImageName(processId);
+            foreach (string ignored in IgnoredFullscreenProcesses)
+            {
+                if (string.Equals(processName, ignored, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            // Layered / click-through windows are overlays (in-game HUDs, capture
+            // rings, tooltips), never the fullscreen app itself.
+            long exStyle = (long)Native.GetWindowLongPtr(foreground, Native.GWL_EXSTYLE);
+            const long overlayStyles = Native.WS_EX_LAYERED | Native.WS_EX_TRANSPARENT;
+            if ((exStyle & overlayStyles) != 0)
+            {
+                return false;
+            }
+
+            string className = Native.GetClassName(foreground);
+            foreach (string shellClass in ShellWindowClasses)
+            {
+                if (string.Equals(className, shellClass, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            if (!Native.GetWindowRect(foreground, out Native.RECT windowRect))
+            {
+                return false;
+            }
+
+            IntPtr monitor = Native.MonitorFromWindow(foreground, Native.MONITOR_DEFAULTTONEAREST);
+            if (monitor == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            var info = new Native.MONITORINFO { cbSize = Marshal.SizeOf<Native.MONITORINFO>() };
+            if (!Native.GetMonitorInfo(monitor, ref info))
+            {
+                return false;
+            }
+
+            // Fullscreen means the window rect covers the *monitor* rect, not the
+            // work area: a maximised window must never hide the bubble.
+            const int tolerance = 2;
+            bool covers = windowRect.Left <= info.rcMonitor.Left + tolerance
+                          && windowRect.Top <= info.rcMonitor.Top + tolerance
+                          && windowRect.Right >= info.rcMonitor.Right - tolerance
+                          && windowRect.Bottom >= info.rcMonitor.Bottom - tolerance;
+            if (!covers)
+            {
+                return false;
+            }
+
+            IntPtr bubbleMonitor = Native.MonitorFromWindow(Handle, Native.MONITOR_DEFAULTTONEAREST);
+            return bubbleMonitor != IntPtr.Zero && bubbleMonitor == monitor;
+        }
+        catch (Exception ex)
+        {
+            LogInteropOnce(ex);
+            return false;
+        }
     }
 
     private void OnWheel(int rawDelta)

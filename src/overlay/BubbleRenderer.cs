@@ -25,6 +25,9 @@ public sealed class RenderResult
     /// <summary>Clickable rows for roots that own (active) children, viewport DIP, top-left origin, scroll applied.</summary>
     public List<RootRowHit> RootRows = new();
 
+    /// <summary>Clickable header icon buttons (§11.2), panel DIP, top-left origin, no scroll.</summary>
+    public List<IconHit> Icons = new();
+
     /// <summary>Height of all body rows plus 10px of bottom breathing room (Swift contentHeight).</summary>
     public float ContentHeight;
 
@@ -44,12 +47,36 @@ public static class BubbleRenderer
     public const float FooterHeight = 28f;
     public const float BodyTop = HeaderHeight + 8f;      // 38
     public const float PanelRadius = 13f;
-    public const float CollapsedHeight = 42f;
     public const float ExpandedWidth = 356f;
-    public const float CollapsedWidth = 238f;
     public const float MaxPanelHeight = 420f;
     public const float MinPanelHeight = 96f;
     public const float RowIndent = 22f;
+
+    // Collapsed pill, §11.1 (v0.3.1): 26 tall, content-sized width.
+    public const float CollapsedHeight = 26f;
+    public const float PillPad = 9f;
+    public const float PillDot = 7f;
+    public const float PillGap = 7f;
+    public const float PillLabelX = PillPad + PillDot + PillGap;   // 23
+    public const float MinCollapsedWidth = 52f;
+    /// <summary>Upper bound for the content-sized pill; use <see cref="PreferredWidth"/>.</summary>
+    public const float CollapsedWidth = 238f;
+
+    // Header icon button ids returned in <see cref="RenderResult.Icons"/> (§11.2).
+    public const string IconIdDesktop = "desktop";
+    public const string IconIdPin = "pin";
+
+    // Expanded header icon buttons: 18x18 at y=6, 14px from the right edge.
+    private const float IconSize = 18f;
+    private const float IconTop = 6f;
+    private const float IconPinRight = 32f;
+    private const float IconDesktopRight = 54f;
+
+    // Segoe UI's ascent is heavier than SF Pro's, so a plain (h - lineHeight)/2
+    // leaves glyph ink ~2px high inside the 26px capsule; these nudges put the
+    // ink's optical centre on the panel's centre line (measured, not guessed).
+    private const float PillTextNudge = 1.75f;
+    private const float PillBadgeNudge = 1f;
 
     private enum RowKind
     {
@@ -95,6 +122,14 @@ public static class BubbleRenderer
 
     private static readonly StringFormat Typographic = CreateTypographicFormat();
 
+    // PreferredWidth() has no Graphics parameter, so content measurement runs on
+    // a tiny off-screen surface. Fonts are palette-independent, so one light
+    // Theme instance supplies the cached font objects for measurement.
+    private static readonly Lazy<Theme> MeasureTheme = new(() => Theme.Create(dark: false));
+    private static readonly object MeasureSync = new();
+    private static Bitmap? _measureSurface;
+    private static Graphics? _measureGraphics;
+
     // ------------------------------------------------------------------
     // Public API (frozen, see docs/PORT-WINDOWS.md §7)
     // ------------------------------------------------------------------
@@ -111,6 +146,47 @@ public static class BubbleRenderer
         float natural = HeaderHeight + ContentHeight(rows) +
                         (IsIdle(state) ? 0f : FooterHeight) + 14f;
         return Math.Min(MaxPanelHeight, Math.Max(MinPanelHeight, natural));
+    }
+
+    /// <summary>
+    /// Panel width for the given state, in logical DIP. Expanded stays at 356;
+    /// the collapsed pill sizes itself to its content (52..238, §11.1).
+    /// </summary>
+    public static float PreferredWidth(BubbleState state)
+    {
+        if (state == null || state.Expanded)
+        {
+            return ExpandedWidth;
+        }
+
+        return PillWidth(MeasureGraphics(), state);
+    }
+
+    /// <summary>
+    /// Content width of the collapsed pill:
+    /// <c>9 + 7 + 7 + labelW + [8 + badgeBoxW] + [8 + timeW] + 9</c>, clamped.
+    /// </summary>
+    private static float PillWidth(Graphics g, BubbleState state)
+    {
+        HeaderParts parts = HeaderContent(state);
+        Font headerFont = MeasureFont(11.5f, semibold: true, mono: false);
+        Font timeFont = MeasureFont(11.5f, semibold: true, mono: true);
+        Font badgeFont = MeasureFont(9.5f, semibold: true, mono: false);
+
+        float width = PillPad + PillDot + PillGap + Measure(g, parts.Label, headerFont).Width;
+        if (parts.Badge.Length > 0)
+        {
+            // 8px gap + the 14px-high badge box (text + 4px padding on each side).
+            width += 8f + Measure(g, parts.Badge, badgeFont).Width + 8f;
+        }
+
+        if (parts.Time.Length > 0)
+        {
+            width += 8f + Measure(g, parts.Time, timeFont).Width;
+        }
+
+        width += PillPad;
+        return Math.Min(CollapsedWidth, Math.Max(MinCollapsedWidth, width));
     }
 
     /// <summary>
@@ -139,70 +215,14 @@ public static class BubbleRenderer
 
             DrawPanel(g, width, height, theme);
 
-            float headerTop = expanded ? 7f : 13f;
-            Font headerFont = theme.Font(11.5f, semibold: true, mono: false);
-            Font timeFont = theme.Font(11.5f, semibold: true, mono: true);
-            Font badgeFont = theme.Font(9.5f, semibold: true, mono: false);
-
-            float pulse = Clamp01(state.Pulse);
-            int activeChildren = CountActiveChildren(roots);
-
-            string label = idle
-                ? "空闲"
-                : roots.Count == 1
-                    ? "外部任务运行中"
-                    : roots.Count + " 个外部任务";
-            string timeText = idle ? "—" : FormatDuration(MaxElapsed(roots));
-            string badge = activeChildren > 0 ? activeChildren + " 子" : "";
-
-            float timeWidth = Measure(g, timeText, timeFont).Width;
-            float timeRight = width - 14f - (expanded ? 22f : 0f);
-            float badgeTextWidth = badge.Length > 0 ? Measure(g, badge, badgeFont).Width : 0f;
-            float badgeRight = timeRight - timeWidth - 8f;
-            float badgeWidth = badgeTextWidth + 8f;
-            float badgeLeft = badgeRight - badgeWidth;
-
-            // Status dot: 7x7, 9px from the top when expanded (Swift y = height-16),
-            // vertically centred otherwise.
-            float dotTop = expanded ? 9f : (height - 7f) / 2f;
-            Color dotColor = idle
-                ? theme.WithAlpha(theme.Muted, 0.55)
-                : theme.WithAlpha(theme.Accent, 0.95 * pulse + 0.05);
-            FillEllipse(g, dotColor, Pad, dotTop, 7f, 7f);
-
-            // Header title, clipped by the time (and badge) on the right.
-            float labelX = Pad + 13f;
-            float labelLimit = timeRight - 6f;
-            if (badge.Length > 0)
-            {
-                labelLimit = Math.Min(labelLimit, badgeLeft - 6f);
-            }
-
-            string headerLabel = TruncateByWidth(g, label, 18, labelLimit - labelX, headerFont);
-            DrawTextTop(g, headerLabel, headerFont, idle ? theme.Muted : theme.Fg, labelX, headerTop);
-            DrawTextRight(g, timeText, timeFont, theme.Fg, timeRight, headerTop, mono: true);
-
-            if (badge.Length > 0)
-            {
-                float badgeTop = expanded ? 7f : (height - 14f) / 2f;
-                float badgeTextTop = expanded ? 7.5f : 13.5f;
-                using (GraphicsPath badgePath = RoundedRectPath(
-                           new RectangleF(badgeLeft, badgeTop, badgeWidth, 14f), 7f))
-                using (var badgeBrush = new SolidBrush(theme.BadgeBg))
-                {
-                    g.FillPath(badgeBrush, badgePath);
-                }
-
-                DrawTextTop(g, badge, badgeFont, theme.Muted, badgeLeft + 4f, badgeTextTop);
-            }
-
+            HeaderParts header = HeaderContent(state);
             if (expanded)
             {
-                DrawPin(g, width - 32f, 6f, 18f, state.Pinned ? theme.Accent : theme.Muted, state.Pinned);
+                DrawExpandedHeader(g, width, theme, state, header, result);
             }
-
-            if (!expanded)
+            else
             {
+                DrawPillHeader(g, width, height, theme, state, header);
                 result.PreferredHeight = CollapsedHeight;
                 return result;
             }
@@ -291,6 +311,218 @@ public static class BubbleRenderer
 
         using var borderPen = new Pen(theme.Border, 1f);
         g.DrawPath(borderPen, path);
+    }
+
+    // ------------------------------------------------------------------
+    // Header: expanded panel vs collapsed pill (§11.1, §11.2)
+    // ------------------------------------------------------------------
+
+    private readonly struct HeaderParts
+    {
+        public readonly string Label;
+        public readonly string Time;
+        public readonly string Badge;
+
+        public HeaderParts(string label, string time, string badge)
+        {
+            Label = label ?? "";
+            Time = time ?? "";
+            Badge = badge ?? "";
+        }
+    }
+
+    /// <summary>
+    /// The strings the header shows for one state. A collapsed *idle* pill has
+    /// neither a time nor a badge — just "空闲" — so it can shrink to ~55px.
+    /// </summary>
+    private static HeaderParts HeaderContent(BubbleState state)
+    {
+        List<RootSession> roots = state.Roots ?? new List<RootSession>();
+        bool idle = roots.Count == 0;
+        bool expanded = state.Expanded;
+
+        string label = idle
+            ? "空闲"
+            : roots.Count == 1
+                ? "外部任务运行中"
+                : roots.Count + " 个外部任务";
+        string time = idle
+            ? (expanded ? "—" : "")
+            : FormatDuration(MaxElapsed(roots));
+        int activeChildren = CountActiveChildren(roots);
+        string badge = activeChildren > 0 && (expanded || !idle) ? activeChildren + " 子" : "";
+
+        return new HeaderParts(label, time, badge);
+    }
+
+    private static void DrawExpandedHeader(
+        Graphics g, float width, Theme theme, BubbleState state, HeaderParts parts, RenderResult result)
+    {
+        const float headerTop = 7f;
+        Font headerFont = theme.Font(11.5f, semibold: true, mono: false);
+        Font timeFont = theme.Font(11.5f, semibold: true, mono: true);
+        Font badgeFont = theme.Font(9.5f, semibold: true, mono: false);
+
+        List<RootSession> roots = state.Roots ?? new List<RootSession>();
+        bool idle = roots.Count == 0;
+        float pulse = Clamp01(state.Pulse);
+
+        float timeWidth = Measure(g, parts.Time, timeFont).Width;
+        // Two 18px icon buttons sit at the right edge (desktop, then pin), so the
+        // time/badge cluster ends 44px from the margin instead of 22px.
+        float timeRight = width - 14f - 44f;
+        float badgeTextWidth = parts.Badge.Length > 0 ? Measure(g, parts.Badge, badgeFont).Width : 0f;
+        float badgeWidth = badgeTextWidth + 8f;
+        float badgeRight = timeRight - timeWidth - 8f;
+        float badgeLeft = badgeRight - badgeWidth;
+
+        // Status dot: 7x7, 9px from the top (Swift y = height-16).
+        Color dotColor = idle
+            ? theme.WithAlpha(theme.Muted, 0.55)
+            : theme.WithAlpha(theme.Accent, 0.95 * pulse + 0.05);
+        FillEllipse(g, dotColor, Pad, 9f, 7f, 7f);
+
+        // Title, clipped by the time (and badge) on the right.
+        float labelX = Pad + 13f;
+        float labelLimit = timeRight - 6f;
+        if (parts.Badge.Length > 0)
+        {
+            labelLimit = Math.Min(labelLimit, badgeLeft - 6f);
+        }
+
+        string headerLabel = TruncateByWidth(g, parts.Label, 18, labelLimit - labelX, headerFont);
+        DrawTextTop(g, headerLabel, headerFont, idle ? theme.Muted : theme.Fg, labelX, headerTop);
+        DrawTextRight(g, parts.Time, timeFont, theme.Fg, timeRight, headerTop, mono: true);
+
+        if (parts.Badge.Length > 0)
+        {
+            using (GraphicsPath badgePath = RoundedRectPath(
+                       new RectangleF(badgeLeft, 7f, badgeWidth, 14f), 7f))
+            using (var badgeBrush = new SolidBrush(theme.BadgeBg))
+            {
+                g.FillPath(badgeBrush, badgePath);
+            }
+
+            DrawTextTop(g, parts.Badge, badgeFont, theme.Muted, badgeLeft + 4f, 7.5f);
+        }
+
+        // Icon buttons (§11.2): desktop-sessions toggle left of the pin.
+        var desktopRect = new RectangleF(width - IconDesktopRight, IconTop, IconSize, IconSize);
+        DrawDesktopIcon(
+            g, desktopRect.X, desktopRect.Y, IconSize,
+            state.IncludeDesktop ? theme.Accent : theme.Muted, state.IncludeDesktop);
+        result.Icons.Add(new IconHit(IconIdDesktop, desktopRect));
+
+        var pinRect = new RectangleF(width - IconPinRight, IconTop, IconSize, IconSize);
+        DrawPin(g, pinRect.X, pinRect.Y, IconSize, state.Pinned ? theme.Accent : theme.Muted, state.Pinned);
+        result.Icons.Add(new IconHit(IconIdPin, pinRect));
+    }
+
+    /// <summary>
+    /// Collapsed pill: 9px padding, dot at x=9, label at x=23, time right-aligned
+    /// at <c>width - 9</c>, everything vertically centred in the 26px capsule.
+    /// </summary>
+    private static void DrawPillHeader(
+        Graphics g, float width, float height, Theme theme, BubbleState state, HeaderParts parts)
+    {
+        Font headerFont = theme.Font(11.5f, semibold: true, mono: false);
+        Font timeFont = theme.Font(11.5f, semibold: true, mono: true);
+        Font badgeFont = theme.Font(9.5f, semibold: true, mono: false);
+
+        List<RootSession> roots = state.Roots ?? new List<RootSession>();
+        bool idle = roots.Count == 0;
+
+        float right = width - PillPad;
+        float timeWidth = parts.Time.Length > 0 ? Measure(g, parts.Time, timeFont).Width : 0f;
+        float timeLeft = right - timeWidth;
+        float badgeTextWidth = parts.Badge.Length > 0 ? Measure(g, parts.Badge, badgeFont).Width : 0f;
+        float badgeWidth = badgeTextWidth + 8f;
+        float badgeRight = parts.Time.Length > 0 ? timeLeft - 8f : right;
+        float badgeLeft = badgeRight - badgeWidth;
+        float contentRight = parts.Badge.Length > 0
+            ? badgeLeft
+            : parts.Time.Length > 0
+                ? timeLeft
+                : right;
+
+        float textTop = (height - headerFont.GetHeight(g)) / 2f + PillTextNudge;
+
+        // Status dot: 7x7 at x=9, vertically centred.
+        Color dotColor = idle
+            ? theme.WithAlpha(theme.Muted, 0.55)
+            : theme.WithAlpha(theme.Accent, 0.95 * Clamp01(state.Pulse) + 0.05);
+        FillEllipse(g, dotColor, PillPad, (height - PillDot) / 2f, PillDot, PillDot);
+
+        // The pill width is derived from this content, so the label only needs
+        // truncating when the window clamped the width down to the minimum. The
+        // 6px gutter only applies when a badge or time follows the label.
+        bool hasRightContent = parts.Badge.Length > 0 || parts.Time.Length > 0;
+        float labelMax = Math.Max(1f, contentRight - (hasRightContent ? 6f : 0f) - PillLabelX + 1f);
+        string label = TruncateByWidth(g, parts.Label, 18, labelMax, headerFont);
+        DrawTextTop(g, label, headerFont, idle ? theme.Muted : theme.Fg, PillLabelX, textTop);
+
+        if (parts.Time.Length > 0)
+        {
+            DrawTextRight(g, parts.Time, timeFont, theme.Fg, right, textTop, mono: true);
+        }
+
+        if (parts.Badge.Length > 0)
+        {
+            float badgeTop = (height - 14f) / 2f;
+            using (GraphicsPath badgePath = RoundedRectPath(
+                       new RectangleF(badgeLeft, badgeTop, badgeWidth, 14f), 7f))
+            using (var badgeBrush = new SolidBrush(theme.BadgeBg))
+            {
+                g.FillPath(badgeBrush, badgePath);
+            }
+
+            float badgeTextTop = badgeTop + (14f - badgeFont.GetHeight(g)) / 2f + PillBadgeNudge;
+            DrawTextTop(g, parts.Badge, badgeFont, theme.Muted, badgeLeft + 4f, badgeTextTop);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Desktop-sessions icon (vector: monitor outline + stand, §11.2)
+    // ------------------------------------------------------------------
+
+    private static void DrawDesktopIcon(Graphics g, float x, float y, float size, Color color, bool filled)
+    {
+        const float ScreenWidth = 12f;
+        const float ScreenHeight = 9f;
+        const float BaseWidth = 5f;
+        const float BaseHeight = 1.5f;
+        const float Gap = 1.5f;
+
+        // 12x9 screen + 1.5px gap + 5x1.5 stand = a 12px block, centred in `size`.
+        float blockHeight = ScreenHeight + Gap + BaseHeight;
+        float top = y + (size - blockHeight) / 2f;
+        float left = x + (size - ScreenWidth) / 2f;
+        float baseLeft = x + (size - BaseWidth) / 2f;
+        float baseTop = top + ScreenHeight + Gap;
+
+        using GraphicsPath screen = RoundedRectPath(
+            new RectangleF(left, top, ScreenWidth, ScreenHeight), 2f);
+        using GraphicsPath baseBar = RoundedRectPath(
+            new RectangleF(baseLeft, baseTop, BaseWidth, BaseHeight), 0.75f);
+
+        if (filled)
+        {
+            using var brush = new SolidBrush(color);
+            g.FillPath(brush, screen);
+            g.FillPath(brush, baseBar);
+            return;
+        }
+
+        using var pen = new Pen(color, 1.2f)
+        {
+            LineJoin = LineJoin.Round,
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+        };
+        g.DrawPath(pen, screen);
+
+        using var baseBrush = new SolidBrush(color);
+        g.FillPath(baseBrush, baseBar);
     }
 
     private static void DrawFooter(Graphics g, float width, float height, List<RootSession> roots, Theme theme)
@@ -1033,6 +1265,32 @@ public static class BubbleRenderer
         }
 
         return runs;
+    }
+
+    /// <summary>
+    /// Off-screen surface used by <see cref="PreferredWidth"/> and by
+    /// <see cref="PillWidth"/> when the caller has no Graphics yet. Lives for the
+    /// process; the 1x1 bitmap is held so the Graphics never outlives its image.
+    /// </summary>
+    private static Graphics MeasureGraphics()
+    {
+        lock (MeasureSync)
+        {
+            if (_measureGraphics != null)
+            {
+                return _measureGraphics;
+            }
+
+            _measureSurface = new Bitmap(1, 1);
+            _measureGraphics = Graphics.FromImage(_measureSurface);
+            _measureGraphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            return _measureGraphics;
+        }
+    }
+
+    private static Font MeasureFont(float size, bool semibold, bool mono)
+    {
+        return MeasureTheme.Value.Font(size, semibold, mono);
     }
 
     private static SizeF Measure(Graphics g, string text, Font font)

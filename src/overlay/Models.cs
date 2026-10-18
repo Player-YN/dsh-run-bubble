@@ -89,6 +89,12 @@ public sealed class BubbleState
     public float ScrollOffset;
     public float Pulse = 1f;
     public HashSet<string> CollapsedRoots = new();
+
+    /// <summary>
+    /// Whether desktop-app sessions participate in the bubble (the desktop icon
+    /// in the expanded header toggles this; daemon side reads config.json).
+    /// </summary>
+    public bool IncludeDesktop;
 }
 
 /// <summary>Clickable rectangle for a root row that owns children.</summary>
@@ -101,6 +107,20 @@ public readonly struct RootRowHit
     public RootRowHit(string rootId, RectangleF bounds)
     {
         RootId = rootId ?? "";
+        Bounds = bounds;
+    }
+}
+
+/// <summary>Clickable icon button in the expanded header (§11.2).</summary>
+/// <remarks>Bounds are panel coordinates (top-left origin, no scroll).</remarks>
+public readonly struct IconHit
+{
+    public readonly string Id;
+    public readonly RectangleF Bounds;
+
+    public IconHit(string id, RectangleF bounds)
+    {
+        Id = id ?? "";
         Bounds = bounds;
     }
 }

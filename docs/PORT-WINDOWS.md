@@ -271,3 +271,74 @@ run-bubble.ps1 uninstall     # 注销任务 + 删 %LOCALAPPDATA%\dsh-run-bubble
 - 活跃性/归属：**不靠启发式** —— win32 用命名信号量租约 + 句柄表精确判定，与 macOS 的 `flock`+`lsof` 语义等价；仅当原生探针不可用时才降级为 `mtime`/sidecar 启发式（此时会标记 `mode: "win-mtime"`）。
 - 无 Accessibility/录屏权限需求（Windows 上也不需要）。
 - UI 文案保持中文优先（与上游一致）。
+
+---
+
+## 11. 迭代 0.3.1：更小的空闲态、桌面会话开关、全屏自动隐藏
+
+### 11.1 胶囊（collapsed）几何 v2
+
+| 项 | v0.3.0 | v0.3.1 |
+|---|---|---|
+| 高 | 42 | **26** |
+| 宽 | 固定 238 | **内容自适应**（`PreferredWidth`），`52..238` |
+| 水平内距 | 12 | **9** |
+| 圆角 | 13 | 13（= 高/2，胶囊形） |
+| 点 | 12 处 | x = 9，垂直居中 |
+| 标签 x | 25 | **23**（9 + 7 + 7） |
+| 空闲时 | 显示 `—` 时间 | **不显示时间与徽标**，只有 `空闲` |
+
+宽度公式（`PillPad=9`、`Dot=7`、`Gap=7`、段间 `8`、右内距 `9`）：
+
+```
+w = 9 + 7 + 7 + labelW
+  + (badgeL ? 8 + badgeW : 0)
+  + (timeL  ? 8 + timeW  : 0)
+  + 9
+clamp(w, 52, 238)
+```
+
+展开态仍为 356 宽；`PreferredWidth(state)` 折叠时返回上式，展开时返回 356。
+窗口 resize 必须同时使用 `PreferredWidth` 与 `PreferredHeight`，锚点仍是 Right/Bottom。
+
+### 11.2 图标按钮（仅展开态，纯图标，无文字）
+
+| id | 位置 | 语义 |
+|---|---|---|
+| `pin` | `(w-32, 6, 18, 18)` | 钉住（既有） |
+| `desktop` | `(w-54, 6, 18, 18)` | 显示/隐藏桌面端会话 |
+
+`desktop` 视觉：显示器轮廓 = 12×9 圆角矩形（r=2）+ 下方 5×1.5 底座居中；
+`state.IncludeDesktop == true` → 用 accent **填充**；`false` → 1.2px muted **描边**。
+不做 tooltip、不加文字。命中矩形通过 `RenderResult.Icons`（`IconHit{Id,Bounds}`）返回。
+
+### 11.3 `config.json`（overlay 与 daemon 的共享开关）
+
+路径：`%DSH_HOME%\run-bubble\config.json`（默认 `%USERPROFILE%\.dsh\run-bubble\config.json`）。
+
+```json
+{ "includeDesktop": false, "hideOnFullscreen": true }
+```
+
+- overlay 启动时读取；点击 `desktop` 图标后翻转 `includeDesktop` 并**原子写回**（tmp+rename，保留未知键）。
+- daemon 每次 refresh 读取（按 mtime 缓存）：`includeDesktop = RUN_BUBBLE_INCLUDE_DESKTOP(若设置) ?? config.includeDesktop ?? false`。
+- `daemon.json` 增加 `includeDesktop` 字段，便于诊断。
+
+### 11.4 全屏自动隐藏
+
+overlay 每 500ms 检查一次，满足以下全部条件时 `ShowWindow(SW_HIDE)`，否则恢复 `SW_SHOWNOACTIVATE`：
+
+1. `hideOnFullscreen == true`（config，默认 true）；
+2. 前台窗口 `GetForegroundWindow()` 可见、未最小化、非本人进程；
+3. 其矩形覆盖 `MonitorFromWindow(that hwnd)` 的 **bounds**（容差 ±2px，不是 work area）；
+4. 该监视器与气泡所在监视器相同；
+5. 类名不是 `Progman` / `WorkerW` / `Shell_TrayWnd` / `Shell_SecondaryTrayWnd`。
+
+snapshot 模式不参与；隐藏时不绘制、不重建位图，恢复时立即重绘一次。
+已知差异：独占全屏（DirectX 独占/部分反作弊游戏）可能切走桌面导致气泡本身不可见，属系统行为；
+无边框全屏、绝大多数游戏与视频全屏均可正确识别。
+
+### 11.5 文案定位
+
+README 明确：本工具服务的是**外部 Agent 调用 DSH 的场景**；桌面端自己的会话默认不显示，
+可用面板上的显示器图标一键切换（或在 `config.json` 里设 `includeDesktop`）。

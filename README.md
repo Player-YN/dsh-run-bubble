@@ -36,6 +36,13 @@
 
 ---
 
+> **Built for external agent runs.** This is a status surface for sessions that
+> *another* agent drives — Codex, Claude Code, Cursor, a script or a CI job calling
+> `dsh --profile acp|headless|sdk`. The desktop app's own chats are filtered out by
+> default so you never get two bubbles for the same conversation; flip the monitor
+> button in the panel (or set `"includeDesktop": true` in `config.json`) if you want
+> them in the bubble too.
+
 ## Why
 
 Coding agents increasingly run in the background: Codex, Claude Code, Cursor, or a
@@ -43,7 +50,7 @@ scripted ACP client starts a DeepSeek Harness session, that session fans out int
 subagents, and the only place to watch it is another terminal tab.
 
 `dsh-run-bubble` is a **local, always-mounted status bubble** for those external
-sessions. It is intentionally small: one Node daemon, one AppKit panel, no
+sessions. It is intentionally small: one Node daemon, one native panel, no
 Electron, no WebView, no network calls, and no changes to the DSH kernel.
 
 It is useful when you:
@@ -61,14 +68,16 @@ It is useful when you:
 
 | | |
 |---|---|
-| **Always mounted** | The idle panel stays on screen as a compact pill; it never hides between runs. |
+| **Tiny idle pill** | Idle collapses to a ~55 × 26 px pill that sizes itself to its label; it never hides between runs. |
 | **Multiple roots** | Every external session gets a stable color, a short id (`#a1b2`), source chip, title, and task preview. |
 | **Child agents** | All active children are listed under their parent; click a root to collapse or expand its child list. |
 | **Structured metadata** | Source, id, child count, model, effort, and turn are separate chips — no indistinguishable gray line. |
 | **Pin** | Pin the expanded panel open; unpin to return to hover behavior. Pin state persists. |
 | **Drag & scroll** | Long-press (~350 ms) to drag; the bottom-right anchor persists across restarts. Body scrolls above 420 px. |
 | **Token totals** | Input / output / cache read / total, aggregated across roots and children. |
-| **Native & quiet** | AppKit `NSPanel`, launchd, ~47 MB overlay. No Accessibility or Screen Recording permission. |
+| **One-click desktop sessions** | A monitor button in the panel toggles the desktop app's own sessions in or out. Icon only, no menus. |
+| **Steps aside for fullscreen** | Hides itself while a game or video owns the monitor, and comes back when it ends. |
+| **Native & quiet** | AppKit `NSPanel` on macOS, layered Win32 window on Windows. No Accessibility or Screen Recording permission. |
 | **Local only** | No server, no telemetry, no account. Reads local logs and local sidecars. |
 
 ## Screenshots
@@ -171,7 +180,7 @@ pwsh -File .\run-bubble.ps1 uninstall   # keeps ~\.dsh\run-bubble\* untouched
 
 <p align="center">
   <img src="docs/images/windows/expanded.png" alt="Windows overlay, expanded" width="356">
-  <img src="docs/images/windows/pill.png" alt="Windows overlay, idle pill" width="238">
+  <img src="docs/images/windows/pill.png" alt="Windows overlay, idle pill" width="56">
   <br><sub><b>Windows.</b> A layered Win32 window with per-pixel alpha; the idle pill never hides.
   More states (light theme included) live in <code>docs/images/windows/</code>.</sub>
 </p>
@@ -184,8 +193,24 @@ for the same conversation.
 
 Windows resolves ownership exactly: DSH guards each session with a named kernel
 semaphore (`Local\dsh-session-lock-<sha256>`), so the daemon reads the real lease
-holder PID and compares it against the desktop host instead of guessing. Want the
-desktop app's own sessions in the bubble anyway? Set `RUN_BUBBLE_INCLUDE_DESKTOP=1`.
+holder PID and compares it against the desktop host instead of guessing.
+
+Want the desktop app's own sessions in the bubble anyway? Click the **monitor
+button** in the expanded panel — it toggles instantly and persists to
+`config.json`. (`RUN_BUBBLE_INCLUDE_DESKTOP=1` still works for scripts and CI.)
+
+### Panel behaviour
+
+- Expanded / collapsed: hover the pill to expand, move away to collapse. Pin keeps
+  it open.
+- The idle pill is deliberately tiny (~55 × 26 px) and sizes itself to its label.
+- **Fullscreen apps hide the bubble automatically.** If a foreground window covers
+  the whole monitor the bubble lives on (a game, a fullscreen video, a presentation),
+  it hides itself and comes back when that window is gone. Set
+  `"hideOnFullscreen": false` in `config.json` to opt out.
+
+The panel's two header icons, left to right: **monitor** (show/hide desktop
+sessions) and **pin**. No text, no menus.
 
 ### Talk to DSH from another agent
 
@@ -286,6 +311,18 @@ strictly read-only: it never acquires, waits on, or releases a session lease.
 }
 ```
 
+### `config.json` (overlay ↔ daemon)
+
+Written by the panel's monitor button; read by both processes.
+
+```json
+{ "includeDesktop": false, "hideOnFullscreen": true }
+```
+
+Path: `$DSH_HOME/run-bubble/config.json` (default `~/.dsh/run-bubble/config.json`).
+Precedence for `includeDesktop`: `RUN_BUBBLE_INCLUDE_DESKTOP` env → `config.json` →
+`false`. Unknown keys are preserved.
+
 ### Sidecar (optional, explicit)
 
 ```json
@@ -328,6 +365,7 @@ the UI.
 | `%USERPROFILE%\.dsh\run-bubble\sessions\` | Optional sidecar metadata |
 | `%USERPROFILE%\.dsh\run-bubble\position.json` | Drag anchor + pin state |
 | `%USERPROFILE%\.dsh\run-bubble\daemon.json` | Daemon pid + diagnostic mode (`win-lease` / `win-mtime`) |
+| `%USERPROFILE%\.dsh\run-bubble\config.json` | Panel toggles: `includeDesktop`, `hideOnFullscreen` |
 
 ## Privacy & security
 
@@ -353,7 +391,12 @@ See [SECURITY.md](SECURITY.md) for the vulnerability-reporting flow.
   Windows uses C#/.NET 8 with a layered Win32 window (`src/overlay/`). The daemon
   and the `status.json` contract are shared.
 - **External sessions only.** Desktop-app chat sessions are filtered to avoid a
-  duplicate bubble. On Windows you can opt in with `RUN_BUBBLE_INCLUDE_DESKTOP=1`.
+  duplicate bubble. On Windows the monitor button — or `"includeDesktop": true` in
+  `config.json` — opts the desktop sessions back in.
+- **Fullscreen detection is window-rectangle based.** Borderless and ordinary
+  fullscreen windows are detected reliably; a game using *exclusive* DirectX
+  fullscreen switches the desktop away, in which case the bubble is simply not
+  visible for the duration (nothing to hide).
 - **Windows liveness needs the probe.** Lease detection depends on
   `DshLeaseProbe.exe`; without it the daemon falls back to a `mtime`/sidecar
   heuristic (`mode: "win-mtime"`) that can briefly misjudge a silent session.

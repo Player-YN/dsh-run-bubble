@@ -11,7 +11,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <Version>0.3.0</Version>
+    <Version>0.3.1</Version>
     <InvariantGlobalization>false</InvariantGlobalization>
     <!-- The SDK default glob picks up Models.cs/Theme.cs/BubbleRenderer.cs/DemoData.cs
          (owned by overlay-render) automatically; nothing is listed explicitly here. -->

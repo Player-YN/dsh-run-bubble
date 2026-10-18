@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-18
+
+### Added
+
+- **Desktop-session toggle in the panel.** A monitor icon next to the pin shows or
+  hides the desktop app's own sessions. Icon-only, no menu, no text; the choice is
+  written to `config.json` and survives restarts.
+- **Fullscreen auto-hide.** When a foreground window covers the whole monitor the
+  bubble lives on (a game, fullscreen video, presentation), the overlay hides
+  itself and returns when that window is gone. Opt out with
+  `"hideOnFullscreen": false`.
+- `config.json` (`$DSH_HOME/run-bubble/config.json`) as the shared runtime
+  settings file between overlay and daemon; `RUN_BUBBLE_INCLUDE_DESKTOP` still
+  overrides it for scripts and CI.
+- `daemon.json` now reports `includeDesktop` alongside `leaseProbe` for diagnosis.
+
+### Changed
+
+- The idle pill shrank from 238 × 42 to a **content-sized ~55 × 26** capsule; the
+  collapsed width is computed from the label, badge and elapsed time and clamped to
+  52–238 px, so the corner it anchors to never jumps. Idle no longer draws a `—`
+  placeholder or a badge.
+- README now states up front that the tool is built for **external agent runs**, and
+  documents the panel icons and the fullscreen behaviour.
+
+### Fixed
+
+- Collapsed width no longer depends on the expanded panel's fixed 238 px, so a
+  short idle label does not leave a mostly empty pill.
+
 ## [0.3.0] - 2026-10-18
 
 Windows port. The daemon and the `status.json` v2 contract are shared by both
