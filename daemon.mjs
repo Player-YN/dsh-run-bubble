@@ -489,7 +489,7 @@ async function lockHoldersFor(entries) {
     let unavailable = false
     try {
       ({ stdout } = await execFileAsync('lsof', ['-F', 'pn', '--', ...paths], {
-        timeout: 5000,
+        timeout: 10000,
         maxBuffer: 8 * 1024 * 1024
       }))
     } catch (error) {
@@ -500,7 +500,11 @@ async function lockHoldersFor(entries) {
       if (!stdout && error?.code !== 1) unavailable = true
     }
     if (unavailable) {
-      value = null
+      // Never fail open on macOS: decoding every session because lsof timed out
+      // resurrects old logs and can make the bubble show a dozen dead roots.
+      // Reuse the last good holder map, or an empty map on cold start.
+      value = bulkHolderCache.value instanceof Map ? bulkHolderCache.value : new Map()
+      logThrottled('lsof', 'lsof unavailable; using cached/empty holder map')
     } else {
       value = new Map(paths.map((lockPath) => [lockPath, []]))
       let currentPid = null

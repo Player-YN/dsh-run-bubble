@@ -17,6 +17,9 @@ All notable changes to this project are documented here. The format follows
 - The macOS overlay now uses the daemon's normalized `shortId` instead of
   rendering `#sess` for `session-<uuid>` ids; child parent ids get the same
   normalization.
+- A transient bulk `lsof` timeout no longer fails open and resurrects a dozen old
+  sessions. The daemon reuses the last good holder map (or an empty map on cold
+  start), so a stalled liveness check cannot flood the bubble with dead roots.
 
 ## [0.3.3] - 2026-10-19
 
