@@ -869,11 +869,14 @@ async function refresh() {
       const depth = Number(header.delegationDepth) || 0
       if (depth > 1) return null
       const createdAt = Number(header.createdAt) || 0
-      if (createdAt > 0 && now - createdAt > RECENT_WINDOW_MS) return null
+      const openTurn = openTurnFromState(record.state)
+      // Long-lived conversations (especially the desktop app's own session) can
+      // be days old while still actively streaming. The age window is only for
+      // avoiding dead legacy logs; an open turn wins.
+      if (createdAt > 0 && now - createdAt > RECENT_WINDOW_MS && !openTurn) return null
       if (IS_WIN && !candidate.leased) {
         // Zombie filter only matters when mtime/sidecar decide liveness; a held
         // lease already proves a live writer.
-        const openTurn = openTurnFromState(record.state)
         if (isZombie({ openTurn, lastEventAt: record.state.lastEventAt, now, staleMs: STALE_MS })) return null
       }
       let inferred = null

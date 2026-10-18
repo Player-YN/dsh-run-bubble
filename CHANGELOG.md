@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-19
+
+### Fixed
+
+- Active sessions older than the 6-hour recent window are no longer dropped.
+  The desktop app's long-lived chat can be days old while still streaming; an
+  open `turn/start` now wins over `createdAt`. This is why the current desktop
+  conversation could still show idle even with `includeDesktop` enabled.
+
 ## [0.3.3] - 2026-10-19
 
 ### Added
