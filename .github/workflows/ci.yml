@@ -92,10 +92,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           foreach ($case in $cases) {
             $target = Join-Path $dir $case.file
-            $args = $case.args + @('--snapshot', $target)
-            & ./dist/RunBubbleOverlay.exe @args
-            if ($LASTEXITCODE -ne 0) { throw "overlay exited $LASTEXITCODE for $($case.file)" }
-            if (-not (Test-Path $target)) { throw "missing snapshot $($case.file)" }
+            Remove-Item -LiteralPath $target -ErrorAction SilentlyContinue
+            $arguments = $case.args + @('--snapshot', $target)
+            # RunBubbleOverlay is a WinExe: `&` does not wait and leaves $LASTEXITCODE
+            # empty, so launch it with Start-Process -Wait and read ExitCode.
+            $process = Start-Process -FilePath './dist/RunBubbleOverlay.exe' -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "overlay exited $($process.ExitCode) for $($case.file)" }
+            if (-not (Test-Path -LiteralPath $target)) { throw "missing snapshot $($case.file)" }
             $image = [System.Drawing.Image]::FromFile($target)
             Write-Host ("{0}: {1}x{2}" -f $case.file, $image.Width, $image.Height)
             $image.Dispose()
@@ -106,9 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-snapshots
-          path: |
-            ${{ env.TEMP }}/expanded.png
-            ${{ env.TEMP }}/pill.png
+          path: ${{ runner.temp }}/rb-shots/*.png
           if-no-files-found: warn
 
       - name: PowerShell syntax check
