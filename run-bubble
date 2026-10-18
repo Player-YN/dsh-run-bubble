@@ -1,0 +1,147 @@
+#!/bin/zsh
+set -u
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+SUPPORT="$HOME/Library/Application Support/dsh-run-bubble"
+AGENTS="$HOME/Library/LaunchAgents"
+LOGS="$HOME/Library/Logs/dsh-run-bubble"
+DAEMON_LABEL="com.dsh.runbubble.daemon"
+OVERLAY_LABEL="com.dsh.runbubble.overlay"
+DAEMON_PLIST="$AGENTS/$DAEMON_LABEL.plist"
+OVERLAY_PLIST="$AGENTS/$OVERLAY_LABEL.plist"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+
+NODE="$(command -v node || true)"
+if [ -z "$NODE" ] && [ -x /opt/homebrew/bin/node ]; then NODE=/opt/homebrew/bin/node; fi
+if [ -z "$NODE" ] && [ -x /usr/local/bin/node ]; then NODE=/usr/local/bin/node; fi
+ZSTD="$(command -v zstd || true)"
+[ -z "$ZSTD" ] && [ -x /opt/homebrew/bin/zstd ] && ZSTD=/opt/homebrew/bin/zstd
+[ -z "$ZSTD" ] && [ -x /usr/local/bin/zstd ] && ZSTD=/usr/local/bin/zstd
+
+die() { echo "run-bubble: $*" >&2; exit 1; }
+
+compile_overlay() {
+  if [ -x "$ROOT/RunBubbleOverlay" ] && [ "${1:-}" != "--rebuild" ]; then return 0; fi
+  command -v swiftc >/dev/null 2>&1 || die "swiftc not found; install Xcode command line tools"
+  echo "compiling overlay..."
+  ( cd "$ROOT" && swiftc -O -parse-as-library -framework AppKit overlay.swift -o RunBubbleOverlay ) || die "overlay compile failed"
+}
+
+write_plists() {
+  mkdir -p "$AGENTS" "$LOGS"
+  cat > "$DAEMON_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$DAEMON_LABEL</string>
+  <key>ProgramArguments</key><array><string>$NODE</string><string>$SUPPORT/daemon.mjs</string></array>
+  <key>WorkingDirectory</key><string>$SUPPORT</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>2</integer>
+  <key>StandardOutPath</key><string>$LOGS/daemon.out.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/daemon.err.log</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict></plist>
+EOF
+  cat > "$OVERLAY_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$OVERLAY_LABEL</string>
+  <key>ProgramArguments</key><array><string>$SUPPORT/RunBubbleOverlay</string></array>
+  <key>WorkingDirectory</key><string>$SUPPORT</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>2</integer>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>StandardOutPath</key><string>$LOGS/overlay.out.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/overlay.err.log</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict></plist>
+EOF
+}
+
+bootout() {
+  launchctl bootout "$DOMAIN/$1" >/dev/null 2>&1 || true
+}
+
+bootstrap() {
+  launchctl bootstrap "$DOMAIN" "$1" >/dev/null 2>&1 || true
+  sleep 0.4
+  if ! launchctl print "$DOMAIN/$2" >/dev/null 2>&1; then
+    sleep 0.8
+    launchctl bootstrap "$DOMAIN" "$1" >/dev/null 2>&1 || true
+  fi
+  launchctl kickstart -k "$DOMAIN/$2" >/dev/null 2>&1 || true
+}
+
+install_all() {
+  [ -n "$NODE" ] || die "node not found"
+  [ -n "$ZSTD" ] || die "zstd not found; run: brew install zstd"
+  compile_overlay "$@"
+  mkdir -p "$SUPPORT" "$LOGS"
+  cp "$ROOT/daemon.mjs" "$SUPPORT/daemon.mjs"
+  cp "$ROOT/RunBubbleOverlay" "$SUPPORT/RunBubbleOverlay"
+  chmod 755 "$SUPPORT/RunBubbleOverlay"
+  write_plists
+  bootout "$DAEMON_LABEL"; bootout "$OVERLAY_LABEL"
+  sleep 1
+  bootstrap "$DAEMON_PLIST" "$DAEMON_LABEL"
+  sleep 1
+  bootstrap "$OVERLAY_PLIST" "$OVERLAY_LABEL"
+  sleep 1
+  echo "installed; node=$NODE zstd=$ZSTD"
+  status_all
+}
+
+start_all() {
+  [ -f "$DAEMON_PLIST" ] && [ -f "$OVERLAY_PLIST" ] || install_all
+  bootstrap "$DAEMON_PLIST" "$DAEMON_LABEL"
+  bootstrap "$OVERLAY_PLIST" "$OVERLAY_LABEL"
+  sleep 1
+  status_all
+}
+
+stop_all() {
+  bootout "$DAEMON_LABEL"; bootout "$OVERLAY_LABEL"
+  echo "stopped"
+}
+
+status_all() {
+  echo "daemon: $(pgrep -f "$SUPPORT/daemon.mjs" | tr '\n' ' ')"
+  echo "overlay: $(pgrep -f "$SUPPORT/RunBubbleOverlay" | tr '\n' ' ')"
+  if [ -f "$HOME/.dsh/run-bubble/status.json" ]; then
+    "$NODE" -e '
+      const fs=require("fs");const p=process.env.HOME+"/.dsh/run-bubble/status.json";
+      try{const d=JSON.parse(fs.readFileSync(p,"utf8"));console.log("roots:",d.roots.length,"children:",d.totals.children,"tokens:",d.totals.tokens.total);}catch(e){console.log("status: unreadable")}
+    '
+  fi
+}
+
+logs_all() {
+  tail -n 40 "$LOGS/daemon.err.log" "$LOGS/overlay.err.log" 2>/dev/null || true
+}
+
+uninstall_all() {
+  stop_all
+  rm -f "$DAEMON_PLIST" "$OVERLAY_PLIST"
+  rm -rf "$SUPPORT"
+  echo "uninstalled (session logs and ~/.dsh/run-bubble/status.json left in place)"
+}
+
+case "${1:-install}" in
+  install) shift || true; install_all "$@" ;;
+  start) start_all ;;
+  stop) stop_all ;;
+  status) status_all ;;
+  logs) logs_all ;;
+  uninstall) uninstall_all ;;
+  snapshot) shift || true; RUN_BUBBLE_STATUS_DIR="${RUN_BUBBLE_STATUS_DIR:-$HOME/.dsh/run-bubble}" "$ROOT/RunBubbleOverlay" --snapshot "${1:-/tmp/run-bubble.png}" ;;
+  *) echo "usage: run-bubble {install|start|stop|status|logs|uninstall|snapshot [path]}"; exit 2 ;;
+esac

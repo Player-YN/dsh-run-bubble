@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="300" viewBox="0 0 1280 300" role="img" aria-label="dsh-run-bubble — always-on-top status for DeepSeek Harness sessions">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080d18"/>
+      <stop offset="1" stop-color="#121a2d"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="0.22" cy="0.3" r="0.5">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.82" cy="0.7" r="0.5">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="1.2" fill="#ffffff" fill-opacity="0.06"/>
+    </pattern>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="300" fill="url(#bg)"/>
+  <rect width="1280" height="300" fill="url(#dots)"/>
+  <rect width="1280" height="300" fill="url(#glow1)"/>
+  <rect width="1280" height="300" fill="url(#glow2)"/>
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <g transform="translate(72 88)">
+      <rect width="30" height="30" rx="8" fill="url(#mark)"/>
+      <circle cx="15" cy="15" r="5" fill="#08101c"/>
+    </g>
+    <text x="118" y="116" font-size="52" font-weight="700" fill="#f8fafc" letter-spacing="-1.5">dsh-run-bubble</text>
+    <text x="72" y="162" font-size="21" fill="#a8b6cc">Always-on-top status for DeepSeek Harness sessions.</text>
+    <g transform="translate(72 193)" font-size="14" font-weight="600">
+      <rect width="98" height="34" rx="17" fill="#111b2e" stroke="#26364f"/>
+      <text x="18" y="22" fill="#7dd3fc">macOS 14+</text>
+      <rect x="110" width="106" height="34" rx="17" fill="#111b2e" stroke="#26364f"/>
+      <text x="128" y="22" fill="#5eead4">AppKit</text>
+      <rect x="228" width="82" height="34" rx="17" fill="#111b2e" stroke="#26364f"/>
+      <text x="246" y="22" fill="#c4b5fd">ACP</text>
+      <rect x="322" width="128" height="34" rx="17" fill="#111b2e" stroke="#26364f"/>
+      <text x="340" y="22" fill="#94a3b8">local-only</text>
+    </g>
+  </g>
+  <g transform="translate(760 38)" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <rect width="456" height="224" rx="24" fill="#0b1220" stroke="#26364f" stroke-opacity="0.9"/>
+    <rect x="1" y="1" width="454" height="52" rx="23" fill="#0e1728"/>
+    <circle cx="30" cy="27" r="5" fill="#2dd4bf"/>
+    <text x="46" y="33" font-size="14" font-weight="700" fill="#f1f5f9">3 external tasks</text>
+    <text x="340" y="33" font-size="13" font-weight="600" fill="#cbd5e1">12:48</text>
+    <g transform="translate(390 15)">
+      <path d="M10 2l6 5v8l-4 3-4-3V7z" fill="none" stroke="#94a3b8" stroke-width="1.5"/>
+      <path d="M10 18v3" stroke="#94a3b8" stroke-width="1.5"/>
+    </g>
+    <circle cx="28" cy="82" r="4" fill="#60a5fa"/>
+    <text x="42" y="87" font-size="14" font-weight="700" fill="#f8fafc">Auth refactor</text>
+    <g transform="translate(42 99)" font-size="11.5">
+      <rect width="58" height="20" rx="7" fill="#60a5fa" fill-opacity="0.18"/>
+      <text x="8" y="14" fill="#93c5fd" font-weight="700">Codex</text>
+      <rect x="64" width="52" height="20" rx="7" fill="#ffffff" fill-opacity="0.06"/>
+      <text x="72" y="14" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">#a1b2</text>
+      <rect x="122" width="48" height="20" rx="7" fill="#2dd4bf" fill-opacity="0.16"/>
+      <text x="131" y="14" fill="#5eead4" font-weight="700">2 子</text>
+      <rect x="176" width="86" height="20" rx="7" fill="#f59e0b" fill-opacity="0.14"/>
+      <text x="185" y="14" fill="#fbbf24" font-weight="700">reasoning</text>
+    </g>
+    <text x="42" y="140" font-size="12.5" fill="#cbd5e1">› Refactor the auth middleware into providers</text>
+    <circle cx="44" cy="166" r="3.5" fill="#60a5fa"/>
+    <text x="56" y="170" font-size="12" fill="#e2e8f0">worker 1: provider adapters</text>
+    <text x="392" y="170" font-size="11" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">0:42</text>
+    <circle cx="44" cy="190" r="3.5" fill="#60a5fa"/>
+    <text x="56" y="194" font-size="12" fill="#e2e8f0">worker 2: call-site migration</text>
+    <text x="392" y="194" font-size="11" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">0:31</text>
+  </g>
+</svg>

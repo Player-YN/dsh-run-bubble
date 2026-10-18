@@ -1,0 +1,10 @@
+.DS_Store
+RunBubbleOverlay
+*.log
+*.tmp
+*.swp
+position.json
+status.json
+node_modules/
+__pycache__/
+.build/
