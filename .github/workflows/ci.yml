@@ -78,6 +78,7 @@ jobs:
 
       - name: Render demo snapshots
         run: |
+          Add-Type -AssemblyName System.Drawing
           $cases = @(
             @{ args = @('--demo');                               file = 'expanded.png' },
             @{ args = @('--demo-many');                          file = 'many.png' },
