@@ -455,14 +455,21 @@ function Get-TaskState {
 
 function Stop-TaskSafely {
     param([string]$TaskName)
+    # 三态区分：未注册 / 已注册但未运行 / 运行中，避免把"已注册但没在跑"说成"不存在"。
     $task = Get-TaskState -TaskName $TaskName
     if ($null -eq $task) {
-        Write-Host ("  计划任务 {0}: 不存在，跳过" -f $TaskName)
-        return
+        if (-not (Test-TaskExists -TaskName $TaskName)) {
+            Write-Host ("  计划任务 {0}: 跳过（未注册）" -f $TaskName)
+            return
+        }
+        Write-Host ("  计划任务 {0}: 已注册但读取状态失败，尝试直接停止" -f $TaskName)
     }
-    if ([string]$task.State -ne 'Running') {
-        Write-Host ("  计划任务 {0}: 未在运行（{1}）" -f $TaskName, [string]$task.State)
-        return
+    else {
+        $stateText = [string]$task.State
+        if ($stateText -ne 'Running' -and $stateText -ne 'Queued') {
+            Write-Host ("  计划任务 {0}: 无需停止（已注册，状态 {1}）" -f $TaskName, $stateText)
+            return
+        }
     }
     try {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
