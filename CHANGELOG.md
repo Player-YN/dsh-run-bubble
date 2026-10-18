@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
   The desktop app's long-lived chat can be days old while still streaming; an
   open `turn/start` now wins over `createdAt`. This is why the current desktop
   conversation could still show idle even with `includeDesktop` enabled.
+- The macOS overlay now uses the daemon's normalized `shortId` instead of
+  rendering `#sess` for `session-<uuid>` ids; child parent ids get the same
+  normalization.
 
 ## [0.3.3] - 2026-10-19
 

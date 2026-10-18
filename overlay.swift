@@ -25,6 +25,7 @@ struct Child {
 
 struct Root {
     var id = ""
+    var shortId = ""
     var title = ""
     var cwd = ""
     var startedAt: Double = 0
@@ -96,6 +97,8 @@ func parseRoot(_ value: Any?) -> Root? {
     guard let d = value as? [String: Any] else { return nil }
     var r = Root()
     r.id = str(d["id"])
+    r.shortId = str(d["shortId"])
+    if r.shortId.isEmpty { r.shortId = shortSessionId(r.id, limit: 8) }
     r.title = str(d["title"])
     r.cwd = str(d["cwd"])
     r.startedAt = num(d["startedAt"])
@@ -131,6 +134,12 @@ func duration(_ ms: Double) -> String {
     let s = total % 60
     if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
     return String(format: "%d:%02d", m, s)
+}
+
+func shortSessionId(_ value: String, limit: Int = 8) -> String {
+    var id = value
+    if id.hasPrefix("session-") { id = String(id.dropFirst("session-".count)) }
+    return String(id.prefix(max(1, limit)))
 }
 
 func effortLabel(_ value: String) -> String {
@@ -556,7 +565,7 @@ final class BubbleView: NSView {
             var source = root.sourceLabel.isEmpty ? root.source : root.sourceLabel
             if root.sourceConfidence == "inferred", !source.isEmpty { source = "~" + source }
             if !source.isEmpty { chips.append(Chip(text: source, style: .source, colorIndex: color)) }
-            if !root.id.isEmpty { chips.append(Chip(text: "#\(root.id.prefix(4))", style: .id, colorIndex: color)) }
+            if !root.id.isEmpty { chips.append(Chip(text: "#\(root.shortId.prefix(4))", style: .id, colorIndex: color)) }
             if !kids.isEmpty { chips.append(Chip(text: "\(kids.count) 子", style: .count, colorIndex: color)) }
             if !root.model.isEmpty { chips.append(Chip(text: root.model, style: .plain, colorIndex: color)) }
             if !root.effort.isEmpty { chips.append(Chip(text: "推理 \(effortLabel(root.effort))", style: .effort, colorIndex: color)) }
@@ -576,7 +585,7 @@ final class BubbleView: NSView {
                     for child in kids {
                         let childElapsed = child.active ? now - child.startedAt : child.elapsedMs
                         let label = child.label.isEmpty ? child.id : child.label
-                        let parent = child.parent.isEmpty ? "" : "← \(child.parent.prefix(8))"
+                        let parent = child.parent.isEmpty ? "" : "← \(shortSessionId(child.parent, limit: 8))"
                         rows.append(Row(kind: .child, text: truncate(label, 22), secondary: parent, time: duration(childElapsed), indent: 22, height: 17, dot: true, colorIndex: color))
                     }
                 }
