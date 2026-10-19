@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-19
+
+### Fixed
+
+- A busy process table can exceed `execFile`'s 1 MB default for
+  `ps -axo pid=,command=`. The resulting `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`
+  was swallowed, so the desktop-host PID set came back empty: desktop sessions
+  were shown even with the monitor toggle off, and their source was `Unknown`.
+  The `ps` calls now use an 8 MB buffer, restoring the desktop filter and the
+  `Desktop` source label.
+- The same buffer fix also restores headless Grok PID scanning on busy machines.
+
 ## [0.6.0] - 2026-10-19
 
 ### Added

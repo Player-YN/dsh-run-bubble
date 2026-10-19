@@ -451,7 +451,12 @@ async function desktopPids() {
   if (now - desktopPidsCache.at < 5000) return desktopPidsCache.value
   let value = new Set()
   try {
-    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], { timeout: 2000 })
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], {
+      timeout: 2000,
+      // A busy desktop can push the process table over execFile's 1 MB default;
+      // silently getting no rows disables the desktop filter (and source labels).
+      maxBuffer: 8 * 1024 * 1024
+    })
     for (const line of stdout.split('\n')) {
       if (!line.includes('dsh-desktop-host/lib/index.js')) continue
       const match = /^\s*(\d+)\s+/.exec(line)
@@ -645,7 +650,10 @@ async function grokHeadlessSessions(excludePids) {
   }
   let value = []
   try {
-    const { stdout: psOut } = await execFileAsync('ps', ['-axo', 'pid=,command='], { timeout: 2000 })
+    const { stdout: psOut } = await execFileAsync('ps', ['-axo', 'pid=,command='], {
+      timeout: 2000,
+      maxBuffer: 8 * 1024 * 1024
+    })
     const candidates = []
     for (const line of psOut.split('\n')) {
       const match = /^\s*(\d+)\s+(.+)$/.exec(line)
