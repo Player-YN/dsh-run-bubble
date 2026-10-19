@@ -522,8 +522,73 @@ function grokTokens(usage) {
   return { input, output, cacheRead, write: 0, total }
 }
 
-function grokRootForSession(id, dir, now, options = {}) {
-  const summary = dir ? readJsonFile(join(dir, 'summary.json')) : null
+function grokSessionSummary(dir) {
+  return dir ? readJsonFile(join(dir, 'summary.json')) : null
+}
+
+function grokChildInfo(childId, meta, index, now) {
+  const dir = index.get(childId) || ''
+  const summary = grokSessionSummary(dir)
+  const usage = dir ? readJsonFile(join(dir, 'usage.json')) : null
+  const label = String(meta?.description || summary?.generated_title || summary?.session_summary || `subagent ${childId.slice(0, 8)}`)
+  const startedAt = isoMs(meta?.started_at) || isoMs(summary?.created_at) || now
+  const status = String(meta?.status || '')
+  const active = status === 'running' || (!status && !meta?.completed_at)
+  const completed = isoMs(meta?.completed_at)
+  const elapsedMs = active
+    ? Math.max(0, now - startedAt)
+    : Number(meta?.duration_ms) || (completed ? Math.max(0, completed - startedAt) : 0)
+  return {
+    id: `grok:${childId}`,
+    shortId: childId.slice(0, 8),
+    colorKey: colorKeyFor(`grok:${childId}`),
+    parentSession: String(meta?.parent_session_id || ''),
+    depth: 1,
+    title: label,
+    titleSource: 'explicit',
+    source: 'grok',
+    sourceLabel: 'Grok Build',
+    sourceConfidence: 'explicit',
+    taskPreview: String(meta?.prompt || '').split('\n')[0],
+    cwd: String(meta?.child_cwd || summary?.info?.cwd || ''),
+    startedAt,
+    elapsedMs,
+    active,
+    turn: Number(meta?.turns) || Number(summary?.next_trace_turn) || 0,
+    model: String(meta?.effective_model_id || summary?.current_model_id || ''),
+    reasoningEffort: String(summary?.reasoning_effort || ''),
+    label,
+    tokens: grokTokens(usage),
+    turnTokens: emptyTokens(),
+    lastEventAt: isoMs(summary?.last_active_at) || completed || startedAt,
+    children: [],
+    activeChildCount: 0,
+    childCount: 0
+  }
+}
+
+function grokChildrenFor(parentDir, parentId, index, now) {
+  if (!parentDir) return []
+  const out = []
+  let entries = []
+  try {
+    entries = readdirSync(join(parentDir, 'subagents'), { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const meta = readJsonFile(join(parentDir, 'subagents', entry.name, 'meta.json'))
+    if (!meta) continue
+    const childId = String(meta.child_session_id || meta.subagent_id || entry.name)
+    out.push(grokChildInfo(childId, meta, index, now))
+  }
+  out.sort((a, b) => a.startedAt - b.startedAt)
+  return out
+}
+
+function grokRootForSession(id, dir, now, options = {}, index = new Map()) {
+  const summary = grokSessionSummary(dir)
   const usage = dir ? readJsonFile(join(dir, 'usage.json')) : null
   const signals = dir ? readJsonFile(join(dir, 'signals.json')) : null
   const cwd = String(summary?.info?.cwd || options.cwd || '')
@@ -536,6 +601,7 @@ function grokRootForSession(id, dir, now, options = {}) {
   const taskPreview = String(summary?.session_summary || summary?.last_turn_summary || '')
   const startedAt = isoMs(options.openedAt) || isoMs(summary?.created_at) || now
   const lastEventAt = isoMs(summary?.last_active_at) || isoMs(summary?.updated_at) || startedAt
+  const children = grokChildrenFor(dir, id, index, now)
   return {
     id: `grok:${id}`,
     shortId: id.slice(0, 8),
@@ -559,9 +625,9 @@ function grokRootForSession(id, dir, now, options = {}) {
     tokens: grokTokens(usage),
     turnTokens: emptyTokens(),
     lastEventAt,
-    children: [],
-    activeChildCount: 0,
-    childCount: 0
+    children,
+    activeChildCount: children.filter((child) => child.active).length,
+    childCount: children.length
   }
 }
 
@@ -654,7 +720,8 @@ async function collectGrokRoots(now, includeTui) {
         if (!id || !grokPidAlive(pid)) continue
         const dir = index.get(id) || ''
         if (!dir) continue
-        bySession.set(id, grokRootForSession(id, dir, now, { cwd: entry.cwd, openedAt: entry.opened_at }))
+        if (grokSessionSummary(dir)?.session_kind === 'subagent') continue
+        bySession.set(id, grokRootForSession(id, dir, now, { cwd: entry.cwd, openedAt: entry.opened_at }, index))
       } catch {}
     }
   }
@@ -663,7 +730,8 @@ async function collectGrokRoots(now, includeTui) {
   // sessions (and DSH desktop sessions).
   for (const item of await grokHeadlessSessions(tuiPids)) {
     if (bySession.has(item.id)) continue
-    bySession.set(item.id, grokRootForSession(item.id, item.dir, now))
+    if (grokSessionSummary(item.dir)?.session_kind === 'subagent') continue
+    bySession.set(item.id, grokRootForSession(item.id, item.dir, now, {}, index))
   }
   return [...bySession.values()]
 }

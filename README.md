@@ -79,7 +79,7 @@ It is useful when you:
 | **One-click desktop sessions** | A monitor button in the panel toggles the desktop app's own sessions in or out. Icon only, no menus. |
 | **Steps aside for fullscreen** | Hides itself while a game or video owns the monitor, and comes back when it ends. |
 | **Native & quiet** | AppKit `NSPanel` on macOS, layered Win32 window on Windows. No Accessibility or Screen Recording permission. |
-| **Grok Build provider** | Open `grok` TUI sessions (controlled by the monitor toggle) and headless `grok -p` / `grok agent` runs (always shown) get roots with title, model, effort, turn, tokens, and elapsed time. |
+| **Grok Build provider** | Open `grok` TUI sessions (controlled by the monitor toggle) and headless `grok -p` / `grok agent` runs (always shown) get roots with title, model, effort, turn, tokens, and elapsed time. Grok `spawn_subagent` children are nested under their parent root. |
 | **Local only** | No server, no telemetry, no account. Reads local logs and local sidecars. |
 
 ## Screenshots
@@ -115,6 +115,11 @@ It is useful when you:
 <p align="center">
   <img src="docs/images/grok.png" alt="A Grok Build TUI session in the bubble" width="356">
   <br><sub><b>Grok Build.</b> Open `grok` TUI sessions appear next to DSH roots; no wrapper needed.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/grok-subagents.png" alt="Five Grok subagents nested under their parent" width="356">
+  <br><sub><b>Grok subagents.</b> Five `spawn_subagent` children stay nested under the parent row.</sub>
 </p>
 
 ## Quick start
@@ -298,7 +303,9 @@ flowchart LR
    effort, turn, and token totals. A dead PID in the registry is ignored. Headless
    `grok -p` / `grok agent` processes are mapped to their session by one bulk
    `lsof` over the open session files; TUI PIDs are excluded from that scan to
-   avoid duplicate roots.
+   avoid duplicate roots. `subagents/<child-id>/meta.json` supplies each child's
+   description, status, model, and duration; child sessions are attached as
+   children instead of separate roots.
 6. The result is written atomically to `~/.dsh/run-bubble/status.json`; the
    overlay polls it every 500 ms and redraws only when state changes.
 7. The panel is always mounted. A short 2.5 s grace period prevents a child

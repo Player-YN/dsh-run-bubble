@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
+### Added
+
+- **Grok subagent children.** `spawn_subagent` children are read from
+  `<parent-session>/subagents/<child-id>/meta.json` and attached under their
+  parent Grok root instead of appearing as separate roots. Each child shows its
+  description (`sub1`…), active/completed state, model, turn, and elapsed time.
+- A parent root now shows the standard `5 子` chip and child rows in the expanded
+  panel when Grok spawns subagents.
+- Child session roots are filtered by `summary.json.session_kind = "subagent"`,
+  so one five-child run produces one parent root with five children.
+
+### Verified
+
+- A live headless `grok -p` run that spawned five `sleep 90` subagents showed one
+  `Grok Build` root with five active children (`sub1`…`sub5`).
+
 ## [0.5.0] - 2026-10-19
 
 ### Added

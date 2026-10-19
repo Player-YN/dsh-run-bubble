@@ -77,7 +77,7 @@
 | **一键切换桌面会话** | 面板里的显示器按钮，图标切换桌面端会话是否显示，无文字无菜单。 |
 | **全屏时自动让位** | 检测到游戏/视频等全屏应用占据所在显示器时自动隐藏，结束后自动回来。 |
 | **原生轻量** | macOS 用 AppKit `NSPanel`，Windows 用分层 Win32 窗口；不需要辅助功能或录屏权限。 |
-| **Grok Build provider** | 打开的 `grok` TUI（受小电脑开关控制）和无头 `grok -p` / `grok agent`（始终显示）都会成为 root，带标题、模型、effort、turn、token 和耗时。 |
+| **Grok Build provider** | 打开的 `grok` TUI（受小电脑开关控制）和无头 `grok -p` / `grok agent`（始终显示）都会成为 root，带标题、模型、effort、turn、token 和耗时；`spawn_subagent` 派生的子 Agent 会挂在父 root 下。 |
 | **纯本地** | 无服务端、无遥测、无账号，只读本地日志和 sidecar。 |
 
 ## 截图
@@ -113,6 +113,11 @@
 <p align="center">
   <img src="docs/images/grok.png" alt="Grok Build TUI 出现在气泡里" width="356">
   <br><sub><b>Grok Build。</b>打开的 `grok` TUI 自动出现在 DSH root 旁边，不需要 wrapper。</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/grok-subagents.png" alt="5 个 Grok 子 Agent 挂在父 root 下" width="356">
+  <br><sub><b>Grok 子 Agent。</b>5 个 `spawn_subagent` 子任务保持在父行下面。</sub>
 </p>
 
 ## 快速开始
