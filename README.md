@@ -5,10 +5,10 @@
 <h1 align="center">dsh-run-bubble</h1>
 
 <p align="center">
-  <b>Always-on-top visibility for DeepSeek Harness sessions on macOS and Windows.</b><br>
+  <b>Always-on-top visibility for DeepSeek Harness and Grok Build sessions on macOS and Windows.</b><br>
   A native AppKit bubble on macOS, a layered Win32 window on Windows, both backed<br>
-  by the same small Node daemon. See roots, child agents, tokens, models, and<br>
-  reasoning effort without switching windows.
+  by the same small Node daemon. See DSH roots, child agents, Grok Build TUIs,<br>
+  tokens, models, and reasoning effort without switching windows.
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
   <img alt="Swift 5.9+" src="https://img.shields.io/badge/Swift-5.9%2B-F05138?logo=swift&logoColor=white">
   <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-5FA04E?logo=nodedotjs&logoColor=white">
+  <img alt="Grok Build supported" src="https://img.shields.io/badge/Grok%20Build-supported-8B5CF6">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-2dd4bf">
 </p>
@@ -78,6 +79,7 @@ It is useful when you:
 | **One-click desktop sessions** | A monitor button in the panel toggles the desktop app's own sessions in or out. Icon only, no menus. |
 | **Steps aside for fullscreen** | Hides itself while a game or video owns the monitor, and comes back when it ends. |
 | **Native & quiet** | AppKit `NSPanel` on macOS, layered Win32 window on Windows. No Accessibility or Screen Recording permission. |
+| **Grok Build provider** | Open `grok` TUI sessions are read from `~/.grok/active_sessions.json` and shown as roots with title, model, effort, turn, tokens, and elapsed time. |
 | **Local only** | No server, no telemetry, no account. Reads local logs and local sidecars. |
 
 ## Screenshots
@@ -110,6 +112,11 @@ It is useful when you:
   <br><sub><b>Long lists scroll.</b> Header, pin, and token footer stay fixed.</sub>
 </p>
 
+<p align="center">
+  <img src="docs/images/grok.png" alt="A Grok Build TUI session in the bubble" width="356">
+  <br><sub><b>Grok Build.</b> Open `grok` TUI sessions appear next to DSH roots; no wrapper needed.</sub>
+</p>
+
 ## Quick start
 
 ### Requirements
@@ -121,6 +128,7 @@ It is useful when you:
 - Node.js 20+
 - `zstd` — `brew install zstd`
 - A DeepSeek Harness installation that supports the `acp` profile (for sessions)
+- Grok Build (optional; open `grok` TUI sessions are auto-detected)
 
 **Windows**
 
@@ -128,6 +136,7 @@ It is useful when you:
 - [.NET 8 SDK](https://dotnet.microsoft.com/download) — builds the overlay and the lease probe
 - Node.js **22.15+** (native `zlib` zstd decompression; 24.x recommended)
 - A DeepSeek Harness installation that supports the `acp` profile (for sessions)
+- Grok Build (optional; open `grok` TUI sessions are auto-detected)
 
 No `zstd` CLI is required on Windows: the daemon decompresses the concatenated
 zstd frames with Node's built-in codec.
@@ -187,9 +196,14 @@ pwsh -File .\run-bubble.ps1 uninstall   # keeps ~\.dsh\run-bubble\* untouched
 
 ### Which sessions are shown
 
-The bubble is for **externally driven** runs (`dsh --profile acp|headless|sdk`).
-Sessions owned by the desktop app are filtered out so you never see two bubbles
-for the same conversation.
+The bubble shows two local providers:
+
+- **DeepSeek Harness** — externally driven runs (`dsh --profile acp|headless|sdk`).
+  Sessions owned by the desktop app are filtered out by default so you never see
+  two bubbles for the same conversation.
+- **Grok Build** — open `grok` TUI sessions registered in
+  `~/.grok/active_sessions.json`. No hook or wrapper is required; the daemon
+  reads the session's local `summary.json`, `signals.json`, and `usage.json`.
 
 Windows resolves ownership exactly: DSH guards each session with a named kernel
 semaphore (`Local\dsh-session-lock-<sha256>`), so the daemon reads the real lease
@@ -249,6 +263,7 @@ flowchart LR
   A -->|"dsh-chat --source/--title"| M["sidecar JSON"]
   B --> S["~/.dsh/sessions<br/>JSONL + zstd"]
   S --> D["run-bubble daemon<br/>Node"]
+  G["~/.grok/active_sessions.json<br/>+ session metadata"] --> D
   M --> D
   P["DshLeaseProbe.exe<br/>session lease holders"] --> D
   D -->|"status.json v2"| O["RunBubbleOverlay<br/>AppKit NSPanel / layered Win32 window"]
@@ -257,7 +272,8 @@ flowchart LR
 ```
 
 1. The daemon scans `~/.dsh/sessions` (or `$DSH_HOME/sessions`) for
-   `session.v*.jsonl.zstd` logs.
+   `session.v*.jsonl.zstd` logs, and `~/.grok/active_sessions.json` (or
+   `$GROK_HOME`) for open Grok Build TUI sessions.
 2. It folds each log once into a compact state: title, model, reasoning effort,
    turn boundaries, token usage, child descriptors, and last event time. It never
    retains the event array. Logs are concatenated zstd frames — one per append —
@@ -272,9 +288,12 @@ flowchart LR
    so in `daemon.json` (`"mode": "win-mtime"`).
 4. Sessions whose lease is held by the DSH desktop host are skipped, so the
    bubble is for terminal/agent-driven runs only.
-5. The result is written atomically to `~/.dsh/run-bubble/status.json`; the
+5. Grok Build entries are matched to `~/.grok/sessions/<encoded-cwd>/<id>/`,
+   then `summary.json`, `signals.json`, and `usage.json` supply the title, model,
+   effort, turn, and token totals. A dead PID in the registry is ignored.
+6. The result is written atomically to `~/.dsh/run-bubble/status.json`; the
    overlay polls it every 500 ms and redraws only when state changes.
-6. The panel is always mounted. A short 2.5 s grace period prevents a child
+7. The panel is always mounted. A short 2.5 s grace period prevents a child
    finishing or a single empty poll from flashing the bubble to idle.
 
 No DSH kernel changes, no patching, no instrumentation. The lease probe is
@@ -355,6 +374,9 @@ the UI.
 | `~/.dsh/run-bubble/status.json` | Latest snapshot |
 | `~/.dsh/run-bubble/sessions/` | Optional sidecar metadata |
 | `~/.dsh/run-bubble/position.json` | Drag anchor + pin state |
+| `~/.grok/active_sessions.json` | Open Grok Build TUI sessions (read-only) |
+| `~/.grok/sessions/**/summary.json` | Grok Build title, model, effort, cwd |
+| `~/.grok/sessions/**/signals.json` / `usage.json` | Grok Build turn/token totals |
 
 **Windows**
 
@@ -417,6 +439,8 @@ See [SECURITY.md](SECURITY.md) for the vulnerability-reporting flow.
   change; measured ~105 MB total idle and ~150–175 MB with 6–8 concurrent large
   sessions. The overlay itself stays around 47 MB on macOS and 60–90 MB on
   Windows.
+- **Grok Build support covers open TUI sessions.** Headless `grok agent` runs do
+  not register an active TUI session, so they are not shown yet.
 - **UI copy is Chinese-first.** The structure is icon- and chip-led; English
   localization is welcome.
 

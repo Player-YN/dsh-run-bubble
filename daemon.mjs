@@ -63,6 +63,9 @@ const STATUS_DIR = process.env.RUN_BUBBLE_STATUS_DIR || join(DSH_HOME, 'run-bubb
 const STATUS_FILE = join(STATUS_DIR, 'status.json')
 const STATE_FILE = join(STATUS_DIR, 'daemon.json')
 const SIDECAR_DIR = join(DSH_HOME, 'run-bubble', 'sessions')
+const GROK_HOME = process.env.GROK_HOME || join(HOME, '.grok')
+const GROK_ACTIVE_FILE = join(GROK_HOME, 'active_sessions.json')
+const GROK_SESSIONS = join(GROK_HOME, 'sessions')
 const LOG_DIR = process.env.RUN_BUBBLE_LOG_DIR || (IS_WIN
   ? join(process.env.LOCALAPPDATA || join(HOME, 'AppData', 'Local'), 'dsh-run-bubble', 'logs')
   : join(HOME, 'Library', 'Logs', 'dsh-run-bubble'))
@@ -457,6 +460,122 @@ async function desktopPids() {
   } catch {}
   desktopPidsCache = { at: now, value }
   return value
+}
+
+/**
+ * Grok Build keeps its open TUI sessions in `~/.grok/active_sessions.json`:
+ * [{ session_id, pid, pid_start, cwd, opened_at }]. Session metadata lives in
+ * `~/.grok/sessions/<encoded-cwd>/<session_id>/{summary,signals,usage}.json`.
+ * Treat this as a read-only second provider; no prompts or credentials are read.
+ */
+function readJsonFile(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function grokSessionIndex() {
+  const out = new Map()
+  try {
+    for (const project of readdirSync(GROK_SESSIONS, { withFileTypes: true })) {
+      if (!project.isDirectory()) continue
+      const projectDir = join(GROK_SESSIONS, project.name)
+      let sessions
+      try {
+        sessions = readdirSync(projectDir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const session of sessions) {
+        if (!session.isDirectory()) continue
+        const dir = join(projectDir, session.name)
+        if (existsSync(join(dir, 'summary.json'))) out.set(session.name, dir)
+      }
+    }
+  } catch {}
+  return out
+}
+
+function grokPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+function isoMs(value) {
+  const ms = Date.parse(String(value || ''))
+  return Number.isFinite(ms) ? ms : 0
+}
+
+function grokTokens(usage) {
+  const session = usage?.session || usage || {}
+  const input = Number(session.inputTokens) || 0
+  const output = Number(session.outputTokens) || 0
+  const cacheRead = Number(session.cachedReadTokens) || 0
+  const total = Number(session.totalTokens) || (input + output + cacheRead)
+  return { input, output, cacheRead, write: 0, total }
+}
+
+async function collectGrokRoots(now) {
+  const active = readJsonFile(GROK_ACTIVE_FILE)
+  if (!Array.isArray(active) || active.length === 0) return []
+  const index = grokSessionIndex()
+  const roots = []
+  for (const entry of active) {
+    try {
+      const id = typeof entry?.session_id === 'string' ? entry.session_id : ''
+      const pid = Number(entry?.pid) || 0
+      if (!id || !grokPidAlive(pid)) continue
+      const dir = index.get(id) || ''
+      const summary = dir ? readJsonFile(join(dir, 'summary.json')) : null
+      const usage = dir ? readJsonFile(join(dir, 'usage.json')) : null
+      const signals = dir ? readJsonFile(join(dir, 'signals.json')) : null
+      const cwd = String(summary?.info?.cwd || entry.cwd || '')
+      const title = String(
+        summary?.generated_title ||
+        summary?.session_summary ||
+        (cwd ? cwd.split('/').filter(Boolean).pop() : '') ||
+        'Grok Build'
+      )
+      const taskPreview = String(summary?.session_summary || summary?.last_turn_summary || '')
+      const startedAt = isoMs(entry.opened_at) || isoMs(summary?.created_at) || now
+      const lastEventAt = isoMs(summary?.last_active_at) || isoMs(summary?.updated_at) || startedAt
+      roots.push({
+        id: `grok:${id}`,
+        shortId: id.slice(0, 8),
+        colorKey: colorKeyFor(`grok:${id}`),
+        parentSession: null,
+        depth: 0,
+        title,
+        titleSource: 'explicit',
+        source: 'grok',
+        sourceLabel: 'Grok Build',
+        sourceConfidence: 'explicit',
+        taskPreview,
+        cwd,
+        startedAt,
+        elapsedMs: Math.max(0, now - startedAt),
+        active: true,
+        turn: Number(signals?.turnCount) || Number(summary?.next_trace_turn) || 0,
+        model: String(summary?.current_model_id || ''),
+        reasoningEffort: String(summary?.reasoning_effort || ''),
+        label: '',
+        tokens: grokTokens(usage),
+        turnTokens: emptyTokens(),
+        lastEventAt,
+        children: [],
+        activeChildCount: 0,
+        childCount: 0
+      })
+    } catch {}
+  }
+  return roots
 }
 
 /**
@@ -1003,6 +1122,10 @@ async function refresh() {
       root.childCount = root.children.length
       root.activeChildCount = root.children.filter((child) => child.active).length
     }
+    // Second provider: open Grok Build TUI sessions. They share the same root
+    // shape and are sorted with DSH roots.
+    const grokRoots = await collectGrokRoots(now)
+    for (const root of grokRoots) activeRoots.push(root)
     activeRoots.sort((a, b) => b.startedAt - a.startedAt)
 
     lastSnapshot = {

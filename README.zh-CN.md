@@ -5,9 +5,9 @@
 <h1 align="center">dsh-run-bubble</h1>
 
 <p align="center">
-  <b>macOS 与 Windows 上常驻显示 DeepSeek Harness 会话状态的桌面气泡。</b><br>
+  <b>macOS 与 Windows 上常驻显示 DeepSeek Harness / Grok Build 会话状态的桌面气泡。</b><br>
   macOS 用原生 AppKit 面板，Windows 用分层 Win32 窗口，共用同一个轻量 Node daemon。<br>
-  不打断当前窗口就能看到主 Session、子 Agent、token、模型和推理强度。
+  不打断当前窗口就能看到主 Session、子 Agent、Grok Build TUI、token、模型和推理强度。
 </p>
 
 <p align="center">
@@ -17,6 +17,7 @@
   <img alt="Swift 5.9+" src="https://img.shields.io/badge/Swift-5.9%2B-F05138?logo=swift&logoColor=white">
   <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-5FA04E?logo=nodedotjs&logoColor=white">
+  <img alt="Grok Build supported" src="https://img.shields.io/badge/Grok%20Build-supported-8B5CF6">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
 </p>
 
@@ -76,6 +77,7 @@
 | **一键切换桌面会话** | 面板里的显示器按钮，图标切换桌面端会话是否显示，无文字无菜单。 |
 | **全屏时自动让位** | 检测到游戏/视频等全屏应用占据所在显示器时自动隐藏，结束后自动回来。 |
 | **原生轻量** | macOS 用 AppKit `NSPanel`，Windows 用分层 Win32 窗口；不需要辅助功能或录屏权限。 |
+| **Grok Build provider** | 读取 `~/.grok/active_sessions.json`，把打开的 `grok` TUI 显示成 root，带标题、模型、effort、turn、token 和耗时。 |
 | **纯本地** | 无服务端、无遥测、无账号，只读本地日志和 sidecar。 |
 
 ## 截图
@@ -108,6 +110,11 @@
   <br><sub><b>长列表滚动。</b>header、钉子和 token footer 固定不动。</sub>
 </p>
 
+<p align="center">
+  <img src="docs/images/grok.png" alt="Grok Build TUI 出现在气泡里" width="356">
+  <br><sub><b>Grok Build。</b>打开的 `grok` TUI 自动出现在 DSH root 旁边，不需要 wrapper。</sub>
+</p>
+
 ## 快速开始
 
 ### 要求
@@ -119,6 +126,7 @@
 - Node.js 20+
 - `zstd`：`brew install zstd`
 - 可运行 `acp` profile 的 DeepSeek Harness（用于产生会话）
+- Grok Build（可选；打开的 `grok` TUI 会自动识别）
 
 **Windows**
 
@@ -126,6 +134,7 @@
 - [.NET 8 SDK](https://dotnet.microsoft.com/download)（编译 overlay 与租约探针）
 - Node.js **22.15+**（需要内置 `zlib` 的 zstd 解压，推荐 24.x）
 - 可运行 `acp` profile 的 DeepSeek Harness（用于产生会话）
+- Grok Build（可选；打开的 `grok` TUI 会自动识别）
 
 Windows 上**不需要** `zstd` 命令行：daemon 用 Node 内置解码器直接处理拼接的多帧 zstd。
 
@@ -183,8 +192,12 @@ pwsh -File .\run-bubble.ps1 uninstall   # 保留 ~\.dsh\run-bubble\* 不动
 
 ### 显示哪些会话
 
-气泡只显示**外部驱动**的会话（`dsh --profile acp|headless|sdk`）。桌面端自己的聊天会话
-会被过滤，避免同一个对话出现两个气泡。
+气泡显示两个本地 provider：
+
+- **DeepSeek Harness**：**外部驱动**的会话（`dsh --profile acp|headless|sdk`）。桌面端
+  自己的聊天默认被过滤，避免同一个对话出现两个气泡。
+- **Grok Build**：`~/.grok/active_sessions.json` 里登记的打开的 `grok` TUI 会话，不需要
+  hook 或 wrapper；daemon 读取该会话的 `summary.json`、`signals.json`、`usage.json`。
 
 Windows 上的归属是**精确**判定的：DSH 为每个会话持有一个命名内核信号量
 （`Local\dsh-session-lock-<sha256>`），daemon 直接读出真实持有者 PID 再与桌面宿主比对，
@@ -237,6 +250,7 @@ flowchart LR
   A -->|"dsh-chat --source/--title"| M["sidecar JSON"]
   B --> S["~/.dsh/sessions<br/>JSONL + zstd"]
   S --> D["run-bubble daemon<br/>Node"]
+  G["~/.grok/active_sessions.json<br/>+ session metadata"] --> D
   M --> D
   P["DshLeaseProbe.exe<br/>会话租约持有者"] --> D
   D -->|"status.json v2"| O["RunBubbleOverlay<br/>AppKit NSPanel / 分层 Win32 窗口"]
@@ -245,7 +259,8 @@ flowchart LR
 ```
 
 1. daemon 扫描 `~/.dsh/sessions`（或 `$DSH_HOME/sessions`）下的
-   `session.v*.jsonl.zstd`。
+   `session.v*.jsonl.zstd`，以及 `~/.grok/active_sessions.json`（或 `$GROK_HOME`）里
+   打开的 Grok Build TUI 会话。
 2. 一次折叠每条日志：标题、模型、推理强度、turn 边界、token、子 Agent 描述和最后事件
    时间；不保留事件数组。日志是**每追加一次就写一帧**的多帧 zstd，解帧器逐帧走，
    不能只解第一帧。
@@ -256,9 +271,12 @@ flowchart LR
    （`Local\dsh-session-lock-<sha256>`）的持有者。没人持有 = 进程已死。探针不可用时
    降级为 `mtime`/sidecar 启发式，并在 `daemon.json` 标记 `"mode": "win-mtime"`。
 4. 如果会话租约由 DSH 桌面端持有，则跳过，避免和桌面端重复。
-5. 结果原子写入 `~/.dsh/run-bubble/status.json`；overlay 每 500ms 轮询一次，状态
+5. Grok Build 条目会匹配到 `~/.grok/sessions/<encoded-cwd>/<id>/`，再用 `summary.json`、
+   `signals.json`、`usage.json` 取标题、模型、effort、turn 和 token；PID 已死的 registry
+   条目会被忽略。
+6. 结果原子写入 `~/.dsh/run-bubble/status.json`；overlay 每 500ms 轮询一次，状态
    变化才重绘。
-6. 面板始终挂载；子 Agent 结束或单次空轮询时保留 2.5 秒 last-non-empty，避免闪烁。
+7. 面板始终挂载；子 Agent 结束或单次空轮询时保留 2.5 秒 last-non-empty，避免闪烁。
 
 没有 DSH 内核改动，没有补丁，没有注入。租约探针严格只读：从不获取、等待或释放任何
 会话租约。
@@ -337,6 +355,9 @@ flowchart LR
 | `~/.dsh/run-bubble/status.json` | 最新状态快照 |
 | `~/.dsh/run-bubble/sessions/` | 可选 sidecar |
 | `~/.dsh/run-bubble/position.json` | 拖动锚点 + 钉子状态 |
+| `~/.grok/active_sessions.json` | 打开的 Grok Build TUI（只读） |
+| `~/.grok/sessions/**/summary.json` | Grok Build 标题、模型、effort、cwd |
+| `~/.grok/sessions/**/signals.json` / `usage.json` | Grok Build turn/token 统计 |
 
 **Windows**
 
@@ -385,6 +406,8 @@ flowchart LR
 - **折叠状态不持久化。** 钉子和拖动位置持久化，root 折叠状态重启后恢复展开。
 - **内存随活跃日志大小增长。** 实测空闲约 105MB，6–8 个并发大日志时约
   150–175MB；overlay 本身 macOS 约 47MB、Windows 约 60–90MB。
+- **Grok Build 目前只覆盖打开的 TUI 会话。** headless `grok agent` 不会登记 active TUI
+  session，所以暂时不显示。
 - **UI 文案以中文为主。** 结构和图标可读，欢迎补英文文案。
 
 ## 开发

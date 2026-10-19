@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-19
+
+### Added
+
+- **Grok Build provider.** Open `grok` TUI sessions are read from
+  `~/.grok/active_sessions.json` and matched to
+  `~/.grok/sessions/<encoded-cwd>/<session-id>/`. The bubble shows their title,
+  model, reasoning effort, turn, token totals, cwd, and elapsed time as roots,
+  with a `Grok Build` source chip. The PID in the registry is checked before a
+  session is shown; no wrapper or hook is required.
+- `GROK_HOME` is honoured when locating the Grok store.
+- DSH sessions launched from a Grok parent process can now infer
+  `source: "grok"` / `sourceLabel: "Grok Build"`.
+
+### Notes
+
+- Grok Build support currently covers open TUI sessions. Headless
+  `grok agent` runs do not register an active TUI session.
+
 ## [0.3.5] - 2026-10-19
 
 ### Changed
