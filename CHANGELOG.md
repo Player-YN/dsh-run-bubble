@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
+### Added
+
+- **Headless Grok Build monitoring.** `grok -p`, `grok agent headless`, and
+  `grok agent stdio` runs are mapped to their session directories by one bulk
+  `lsof` over the session files they keep open. They show the same Grok Build
+  title/model/effort/turn/token fields and remain visible regardless of the
+  monitor toggle.
+- The macOS monitor button now controls **Grok Build TUI sessions as well as
+  DSH desktop sessions**; headless Grok runs stay visible.
+
+### Changed
+
+- The monitor toggle is now explicitly documented as "interactive sessions"
+  (DSH desktop + Grok TUI) while headless work is always shown.
+
+### Notes
+
+- A headless Grok process is visible once it has opened a session file; a process
+  still booting may appear one refresh later.
+
 ## [0.4.0] - 2026-10-19
 
 ### Added

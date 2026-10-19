@@ -77,7 +77,7 @@
 | **一键切换桌面会话** | 面板里的显示器按钮，图标切换桌面端会话是否显示，无文字无菜单。 |
 | **全屏时自动让位** | 检测到游戏/视频等全屏应用占据所在显示器时自动隐藏，结束后自动回来。 |
 | **原生轻量** | macOS 用 AppKit `NSPanel`，Windows 用分层 Win32 窗口；不需要辅助功能或录屏权限。 |
-| **Grok Build provider** | 读取 `~/.grok/active_sessions.json`，把打开的 `grok` TUI 显示成 root，带标题、模型、effort、turn、token 和耗时。 |
+| **Grok Build provider** | 打开的 `grok` TUI（受小电脑开关控制）和无头 `grok -p` / `grok agent`（始终显示）都会成为 root，带标题、模型、effort、turn、token 和耗时。 |
 | **纯本地** | 无服务端、无遥测、无账号，只读本地日志和 sidecar。 |
 
 ## 截图
@@ -196,8 +196,10 @@ pwsh -File .\run-bubble.ps1 uninstall   # 保留 ~\.dsh\run-bubble\* 不动
 
 - **DeepSeek Harness**：**外部驱动**的会话（`dsh --profile acp|headless|sdk`）。桌面端
   自己的聊天默认被过滤，避免同一个对话出现两个气泡。
-- **Grok Build**：`~/.grok/active_sessions.json` 里登记的打开的 `grok` TUI 会话，不需要
-  hook 或 wrapper；daemon 读取该会话的 `summary.json`、`signals.json`、`usage.json`。
+- **Grok Build**：`~/.grok/active_sessions.json` 里登记的打开的 `grok` TUI 会话，以及
+  通过进程打开文件映射到的无头 `grok -p` / `grok agent` 会话。TUI 受小电脑开关控制，
+  无头始终显示。不需要 hook 或 wrapper；daemon 读取本地 `summary.json`、
+  `signals.json`、`usage.json`。
 
 Windows 上的归属是**精确**判定的：DSH 为每个会话持有一个命名内核信号量
 （`Local\dsh-session-lock-<sha256>`），daemon 直接读出真实持有者 PID 再与桌面宿主比对，
@@ -214,7 +216,8 @@ Windows 上的归属是**精确**判定的：DSH 为每个会话持有一个命�
   演示文稿）时自动隐藏，窗口消失后自动恢复。想关掉这个行为，在 `config.json` 里设
   `"hideOnFullscreen": false`。
 
-头部两个图标，从左到右：**显示器**（显示/隐藏桌面会话）、**钉子**。没有文字，没有菜单。
+头部两个图标，从左到右：**显示器**（显示/隐藏 DSH 桌面会话和 Grok Build TUI 会话）、
+**钉子**。无头 Grok 始终显示。没有文字，没有菜单。
 
 ### 从其他 Agent 调用 DSH
 
@@ -271,9 +274,10 @@ flowchart LR
    （`Local\dsh-session-lock-<sha256>`）的持有者。没人持有 = 进程已死。探针不可用时
    降级为 `mtime`/sidecar 启发式，并在 `daemon.json` 标记 `"mode": "win-mtime"`。
 4. 如果会话租约由 DSH 桌面端持有，则跳过，避免和桌面端重复。
-5. Grok Build 条目会匹配到 `~/.grok/sessions/<encoded-cwd>/<id>/`，再用 `summary.json`、
-   `signals.json`、`usage.json` 取标题、模型、effort、turn 和 token；PID 已死的 registry
-   条目会被忽略。
+5. Grok Build TUI 条目会匹配到 `~/.grok/sessions/<encoded-cwd>/<id>/`，再用
+   `summary.json`、`signals.json`、`usage.json` 取标题、模型、effort、turn 和 token；
+   PID 已死的 registry 条目会被忽略。无头 `grok -p` / `grok agent` 进程通过一次批量
+   `lsof` 根据打开的 session 文件映射，TUI PID 会从该扫描中排除，避免重复 root。
 6. 结果原子写入 `~/.dsh/run-bubble/status.json`；overlay 每 500ms 轮询一次，状态
    变化才重绘。
 7. 面板始终挂载；子 Agent 结束或单次空轮询时保留 2.5 秒 last-non-empty，避免闪烁。
@@ -406,8 +410,8 @@ flowchart LR
 - **折叠状态不持久化。** 钉子和拖动位置持久化，root 折叠状态重启后恢复展开。
 - **内存随活跃日志大小增长。** 实测空闲约 105MB，6–8 个并发大日志时约
   150–175MB；overlay 本身 macOS 约 47MB、Windows 约 60–90MB。
-- **Grok Build 目前只覆盖打开的 TUI 会话。** headless `grok agent` 不会登记 active TUI
-  session，所以暂时不显示。
+- **Grok Build TUI 受小电脑开关控制。** 无头 `grok -p` / `grok agent` 始终显示；进程
+  还没打开 session 文件时，会稍后才出现。
 - **UI 文案以中文为主。** 结构和图标可读，欢迎补英文文案。
 
 ## 开发

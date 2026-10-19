@@ -522,60 +522,150 @@ function grokTokens(usage) {
   return { input, output, cacheRead, write: 0, total }
 }
 
-async function collectGrokRoots(now) {
-  const active = readJsonFile(GROK_ACTIVE_FILE)
-  if (!Array.isArray(active) || active.length === 0) return []
-  const index = grokSessionIndex()
-  const roots = []
-  for (const entry of active) {
-    try {
-      const id = typeof entry?.session_id === 'string' ? entry.session_id : ''
-      const pid = Number(entry?.pid) || 0
-      if (!id || !grokPidAlive(pid)) continue
-      const dir = index.get(id) || ''
-      const summary = dir ? readJsonFile(join(dir, 'summary.json')) : null
-      const usage = dir ? readJsonFile(join(dir, 'usage.json')) : null
-      const signals = dir ? readJsonFile(join(dir, 'signals.json')) : null
-      const cwd = String(summary?.info?.cwd || entry.cwd || '')
-      const title = String(
-        summary?.generated_title ||
-        summary?.session_summary ||
-        (cwd ? cwd.split('/').filter(Boolean).pop() : '') ||
-        'Grok Build'
-      )
-      const taskPreview = String(summary?.session_summary || summary?.last_turn_summary || '')
-      const startedAt = isoMs(entry.opened_at) || isoMs(summary?.created_at) || now
-      const lastEventAt = isoMs(summary?.last_active_at) || isoMs(summary?.updated_at) || startedAt
-      roots.push({
-        id: `grok:${id}`,
-        shortId: id.slice(0, 8),
-        colorKey: colorKeyFor(`grok:${id}`),
-        parentSession: null,
-        depth: 0,
-        title,
-        titleSource: 'explicit',
-        source: 'grok',
-        sourceLabel: 'Grok Build',
-        sourceConfidence: 'explicit',
-        taskPreview,
-        cwd,
-        startedAt,
-        elapsedMs: Math.max(0, now - startedAt),
-        active: true,
-        turn: Number(signals?.turnCount) || Number(summary?.next_trace_turn) || 0,
-        model: String(summary?.current_model_id || ''),
-        reasoningEffort: String(summary?.reasoning_effort || ''),
-        label: '',
-        tokens: grokTokens(usage),
-        turnTokens: emptyTokens(),
-        lastEventAt,
-        children: [],
-        activeChildCount: 0,
-        childCount: 0
-      })
-    } catch {}
+function grokRootForSession(id, dir, now, options = {}) {
+  const summary = dir ? readJsonFile(join(dir, 'summary.json')) : null
+  const usage = dir ? readJsonFile(join(dir, 'usage.json')) : null
+  const signals = dir ? readJsonFile(join(dir, 'signals.json')) : null
+  const cwd = String(summary?.info?.cwd || options.cwd || '')
+  const title = String(
+    summary?.generated_title ||
+    summary?.session_summary ||
+    (cwd ? cwd.split('/').filter(Boolean).pop() : '') ||
+    'Grok Build'
+  )
+  const taskPreview = String(summary?.session_summary || summary?.last_turn_summary || '')
+  const startedAt = isoMs(options.openedAt) || isoMs(summary?.created_at) || now
+  const lastEventAt = isoMs(summary?.last_active_at) || isoMs(summary?.updated_at) || startedAt
+  return {
+    id: `grok:${id}`,
+    shortId: id.slice(0, 8),
+    colorKey: colorKeyFor(`grok:${id}`),
+    parentSession: null,
+    depth: 0,
+    title,
+    titleSource: 'explicit',
+    source: 'grok',
+    sourceLabel: 'Grok Build',
+    sourceConfidence: 'explicit',
+    taskPreview,
+    cwd,
+    startedAt,
+    elapsedMs: Math.max(0, now - startedAt),
+    active: true,
+    turn: Number(signals?.turnCount) || Number(summary?.next_trace_turn) || 0,
+    model: String(summary?.current_model_id || ''),
+    reasoningEffort: String(summary?.reasoning_effort || ''),
+    label: '',
+    tokens: grokTokens(usage),
+    turnTokens: emptyTokens(),
+    lastEventAt,
+    children: [],
+    activeChildCount: 0,
+    childCount: 0
   }
-  return roots
+}
+
+/**
+ * Headless `grok -p` / `grok agent` processes do not appear in
+ * active_sessions.json, but they keep their session's events/terminal files
+ * open. One bulk lsof maps those PIDs to session directories. TUI PIDs are
+ * excluded so the same session is not counted twice.
+ */
+async function grokHeadlessSessions(excludePids) {
+  const now = Date.now()
+  const key = [...excludePids].sort((a, b) => a - b).join(',')
+  if (grokHeadlessCache.value && grokHeadlessCache.key === key && now - grokHeadlessCache.at < 2500) {
+    return grokHeadlessCache.value
+  }
+  let value = []
+  try {
+    const { stdout: psOut } = await execFileAsync('ps', ['-axo', 'pid=,command='], { timeout: 2000 })
+    const candidates = []
+    for (const line of psOut.split('\n')) {
+      const match = /^\s*(\d+)\s+(.+)$/.exec(line)
+      if (!match) continue
+      const pid = Number(match[1])
+      const command = match[2]
+      if (excludePids.has(pid)) continue
+      // Only headless forms; a TUI with an initial prompt must not be mistaken
+      // for a headless run.
+      if (!command.includes('.grok/bin/grok')) continue
+      if (!/(?:\s-p\s|--single|--prompt-file|--prompt-json|--output-format|\sagent\s)/.test(command)) continue
+      candidates.push(pid)
+    }
+    if (candidates.length === 0) {
+      grokHeadlessCache = { at: now, key, value }
+      return value
+    }
+    let lsofOut = ''
+    try {
+      ({ stdout: lsofOut } = await execFileAsync('lsof', ['-p', candidates.join(','), '-F', 'pn'], {
+        timeout: 5000,
+        maxBuffer: 8 * 1024 * 1024
+      }))
+    } catch (error) {
+      lsofOut = typeof error?.stdout === 'string' ? error.stdout : ''
+      if (!lsofOut) {
+        grokHeadlessCache = { at: now, key, value }
+        return value
+      }
+    }
+    const seen = new Set()
+    let currentPid = 0
+    for (const line of lsofOut.split('\n')) {
+      if (!line) continue
+      if (line[0] === 'p') {
+        currentPid = Number(line.slice(1)) || 0
+        continue
+      }
+      if (line[0] !== 'n' || !currentPid) continue
+      const path = line.slice(1)
+      if (!path.startsWith(GROK_SESSIONS + '/')) continue
+      const rel = path.slice(GROK_SESSIONS.length + 1)
+      const parts = rel.split('/')
+      if (parts.length < 2) continue
+      const id = parts[1]
+      const dir = join(GROK_SESSIONS, parts[0], id)
+      if (seen.has(id) || !existsSync(join(dir, 'summary.json'))) continue
+      seen.add(id)
+      value.push({ id, dir })
+    }
+  } catch {}
+  grokHeadlessCache = { at: now, key, value }
+  return value
+}
+
+async function collectGrokRoots(now, includeTui) {
+  const active = readJsonFile(GROK_ACTIVE_FILE)
+  const entries = Array.isArray(active) ? active : []
+  const index = grokSessionIndex()
+  const bySession = new Map()
+  const tuiPids = new Set()
+  for (const entry of entries) {
+    const pid = Number(entry?.pid) || 0
+    if (pid > 0) tuiPids.add(pid)
+  }
+
+  if (includeTui) {
+    for (const entry of entries) {
+      try {
+        const id = typeof entry?.session_id === 'string' ? entry.session_id : ''
+        const pid = Number(entry?.pid) || 0
+        if (!id || !grokPidAlive(pid)) continue
+        const dir = index.get(id) || ''
+        if (!dir) continue
+        bySession.set(id, grokRootForSession(id, dir, now, { cwd: entry.cwd, openedAt: entry.opened_at }))
+      } catch {}
+    }
+  }
+
+  // Headless runs are always visible; the monitor toggle only affects TUI
+  // sessions (and DSH desktop sessions).
+  for (const item of await grokHeadlessSessions(tuiPids)) {
+    if (bySession.has(item.id)) continue
+    bySession.set(item.id, grokRootForSession(item.id, item.dir, now))
+  }
+  return [...bySession.values()]
 }
 
 /**
@@ -810,6 +900,7 @@ function publicInfo(info) {
 let cache = new Map()
 let bulkHolderCache = { at: 0, key: '', value: null }
 let sourceCache = new Map()
+let grokHeadlessCache = { at: 0, key: '', value: null }
 let desktopPidsCache = { at: 0, value: new Set() }
 let refreshing = false
 let mode = judgmentMode({ platform: PLATFORM })
@@ -1124,7 +1215,7 @@ async function refresh() {
     }
     // Second provider: open Grok Build TUI sessions. They share the same root
     // shape and are sorted with DSH roots.
-    const grokRoots = await collectGrokRoots(now)
+    const grokRoots = await collectGrokRoots(now, includeDesktop)
     for (const root of grokRoots) activeRoots.push(root)
     activeRoots.sort((a, b) => b.startedAt - a.startedAt)
 

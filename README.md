@@ -79,7 +79,7 @@ It is useful when you:
 | **One-click desktop sessions** | A monitor button in the panel toggles the desktop app's own sessions in or out. Icon only, no menus. |
 | **Steps aside for fullscreen** | Hides itself while a game or video owns the monitor, and comes back when it ends. |
 | **Native & quiet** | AppKit `NSPanel` on macOS, layered Win32 window on Windows. No Accessibility or Screen Recording permission. |
-| **Grok Build provider** | Open `grok` TUI sessions are read from `~/.grok/active_sessions.json` and shown as roots with title, model, effort, turn, tokens, and elapsed time. |
+| **Grok Build provider** | Open `grok` TUI sessions (controlled by the monitor toggle) and headless `grok -p` / `grok agent` runs (always shown) get roots with title, model, effort, turn, tokens, and elapsed time. |
 | **Local only** | No server, no telemetry, no account. Reads local logs and local sidecars. |
 
 ## Screenshots
@@ -202,8 +202,10 @@ The bubble shows two local providers:
   Sessions owned by the desktop app are filtered out by default so you never see
   two bubbles for the same conversation.
 - **Grok Build** — open `grok` TUI sessions registered in
-  `~/.grok/active_sessions.json`. No hook or wrapper is required; the daemon
-  reads the session's local `summary.json`, `signals.json`, and `usage.json`.
+  `~/.grok/active_sessions.json`, plus headless `grok -p` / `grok agent` runs
+  whose session files are held open by the process. TUI roots follow the panel's
+  monitor toggle; headless runs are always shown. No hook or wrapper is required;
+  the daemon reads local `summary.json`, `signals.json`, and `usage.json`.
 
 Windows resolves ownership exactly: DSH guards each session with a named kernel
 semaphore (`Local\dsh-session-lock-<sha256>`), so the daemon reads the real lease
@@ -217,14 +219,17 @@ button** in the expanded panel — it toggles instantly and persists to
 
 - Expanded / collapsed: hover the pill to expand, move away to collapse. Pin keeps
   it open.
+- The monitor toggle covers DSH desktop sessions **and** Grok Build TUI sessions;
+  headless `grok -p` / `grok agent` runs are always visible.
 - The idle pill is deliberately tiny (~55 × 26 px) and sizes itself to its label.
 - **Fullscreen apps hide the bubble automatically.** If a foreground window covers
   the whole monitor the bubble lives on (a game, a fullscreen video, a presentation),
   it hides itself and comes back when that window is gone. Set
   `"hideOnFullscreen": false` in `config.json` to opt out.
 
-The panel's two header icons, left to right: **monitor** (show/hide desktop
-sessions) and **pin**. No text, no menus.
+The panel's two header icons, left to right: **monitor** (show/hide DSH desktop
+sessions and Grok Build TUI sessions) and **pin**. Headless runs stay visible
+regardless. No text, no menus.
 
 ### Talk to DSH from another agent
 
@@ -290,7 +295,10 @@ flowchart LR
    bubble is for terminal/agent-driven runs only.
 5. Grok Build entries are matched to `~/.grok/sessions/<encoded-cwd>/<id>/`,
    then `summary.json`, `signals.json`, and `usage.json` supply the title, model,
-   effort, turn, and token totals. A dead PID in the registry is ignored.
+   effort, turn, and token totals. A dead PID in the registry is ignored. Headless
+   `grok -p` / `grok agent` processes are mapped to their session by one bulk
+   `lsof` over the open session files; TUI PIDs are excluded from that scan to
+   avoid duplicate roots.
 6. The result is written atomically to `~/.dsh/run-bubble/status.json`; the
    overlay polls it every 500 ms and redraws only when state changes.
 7. The panel is always mounted. A short 2.5 s grace period prevents a child
@@ -439,8 +447,9 @@ See [SECURITY.md](SECURITY.md) for the vulnerability-reporting flow.
   change; measured ~105 MB total idle and ~150–175 MB with 6–8 concurrent large
   sessions. The overlay itself stays around 47 MB on macOS and 60–90 MB on
   Windows.
-- **Grok Build support covers open TUI sessions.** Headless `grok agent` runs do
-  not register an active TUI session, so they are not shown yet.
+- **Grok Build TUI sessions follow the monitor toggle.** Headless `grok -p` /
+  `grok agent` runs are always shown. A headless process that has not yet opened
+  a session file is not visible until it does.
 - **UI copy is Chinese-first.** The structure is icon- and chip-led; English
   localization is welcome.
 

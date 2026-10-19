@@ -348,7 +348,7 @@ final class BubbleView: NSView {
         let includeDesktop = panel?.includeDesktop == true
         desktopButton.image = NSImage(systemSymbolName: "display", accessibilityDescription: "桌面端会话")
         desktopButton.contentTintColor = includeDesktop ? accent : muted
-        desktopButton.toolTip = includeDesktop ? "隐藏桌面端会话" : "显示桌面端会话"
+        desktopButton.toolTip = includeDesktop ? "隐藏桌面端与 Grok TUI 会话" : "显示桌面端与 Grok TUI 会话"
         needsLayout = true
     }
 
